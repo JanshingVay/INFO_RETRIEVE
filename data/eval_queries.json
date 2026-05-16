@@ -1,0 +1,52 @@
+[
+  {
+    "query": "人工智能技术发展",
+    "description": "关于人工智能技术发展和趋势的文章",
+    "relevant_docs": []
+  },
+  {
+    "query": "5G通信网络",
+    "description": "关于5G通信技术和网络建设的文章",
+    "relevant_docs": []
+  },
+  {
+    "query": "新能源汽车",
+    "description": "关于新能源汽车、电动汽车的文章",
+    "relevant_docs": []
+  },
+  {
+    "query": "芯片半导体",
+    "description": "关于芯片制造、半导体产业的文章",
+    "relevant_docs": []
+  },
+  {
+    "query": "大数据云计算",
+    "description": "关于大数据处理、云计算技术的文章",
+    "relevant_docs": []
+  },
+  {
+    "query": "航天探索",
+    "description": "关于航天技术、太空探索的文章",
+    "relevant_docs": []
+  },
+  {
+    "query": "环境保护",
+    "description": "关于环境保护、碳中和、可持续发展的文章",
+    "relevant_docs": []
+  },
+  {
+    "query": "医疗健康",
+    "description": "关于医疗技术、健康科学的文章",
+    "relevant_docs": []
+  },
+  {
+    "query": "区块链技术",
+    "description": "关于区块链、加密货币技术的文章",
+    "relevant_docs": []
+  },
+  {
+    "query": "机器人自动化",
+    "description": "关于机器人技术、工业自动化的文章",
+    "relevant_docs": []
+  }
+]
