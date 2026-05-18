@@ -95,6 +95,95 @@ class VectorSpaceModel:
             })
         return output
 
+    def search_with_feedback(self, query_tokens, feedback_store, top_k=None,
+                              query_expansion=True, boost_strength=None):
+        """
+        Search with relevance feedback optimization.
+
+        Two mechanisms:
+        1. Query expansion — add high-IDF terms from liked documents
+        2. Document boosting — boost score of well-rated documents
+
+        Args:
+            query_tokens: Original query tokens
+            feedback_store: FeedbackStore instance
+            top_k: Results count
+            query_expansion: Enable Rocchio query expansion
+            boost_strength: Strength of document boost (0 = disable)
+
+        Returns:
+            List of result dicts, with 'feedback_boosted' flag and 'original_score'
+        """
+        if top_k is None:
+            top_k = VSM_TOP_K
+
+        expanded_tokens = list(query_tokens)
+        expansion_terms = []
+
+        if query_expansion:
+            expansion_terms = feedback_store.expand_query_tokens(
+                query_tokens, self.index, top_k=5
+            )
+            if expansion_terms:
+                expanded_tokens = list(query_tokens)
+                for term, weight in expansion_terms:
+                    for _ in range(max(1, int(weight * 10))):
+                        expanded_tokens.append(term)
+
+        query_vec = self._compute_tfidf_vector(expanded_tokens)
+        if not query_vec:
+            return []
+
+        candidate_docs = set()
+        for token in set(expanded_tokens):
+            postings = self.index.get_postings(token)
+            candidate_docs.update(postings.keys())
+
+        results = []
+        for doc_id in candidate_docs:
+            doc = self._get_doc(doc_id)
+            if doc is None:
+                continue
+            doc_tokens = doc.get("tokens", doc.get("tokens", []))
+            doc_vec = self._compute_tfidf_vector(doc_tokens)
+            score = self._cosine_similarity(query_vec, doc_vec)
+
+            fb_boost = feedback_store.get_document_boost(
+                doc_id,
+                boost_strength if boost_strength is not None else None
+            )
+            if fb_boost != 0:
+                score += fb_boost
+
+            if score > 0:
+                results.append((doc_id, score))
+
+        results.sort(key=lambda x: x[1], reverse=True)
+        top_results = results[:top_k]
+
+        liked_docs = feedback_store.get_liked_docs()
+        output = []
+        for doc_id, score in top_results:
+            doc = self._get_doc(doc_id)
+            if doc is None:
+                continue
+            snippet = self._generate_snippet(doc, query_tokens)
+            output.append({
+                "id": doc_id,
+                "score": round(score, 6),
+                "title": doc.get("title", "无标题"),
+                "snippet": snippet,
+                "url": doc.get("url", ""),
+                "date": doc.get("date", ""),
+                "feedback_boosted": doc_id in liked_docs,
+            })
+
+        if expansion_terms:
+            print(f"\n  [Rocchio扩展] 添加了 {len(expansion_terms)} 个相关词: "
+                  f"{', '.join(t for t, _ in expansion_terms[:5])}")
+
+        return output
+
     def _generate_snippet(self, doc, query_tokens, window=60):
         """Generate a text snippet around query term matches."""
         text = doc.get("text", "")

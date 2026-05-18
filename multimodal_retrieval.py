@@ -181,14 +181,15 @@ class CLIPImageRetriever:
             json.dump(self.image_metadata, f, ensure_ascii=False, indent=2)
     
     def _encode_image_clip(self, image_path: str) -> np.ndarray:
-        """Encode image using CLIP."""
+        """Encode image using CLIP (Version-Robust Method)."""
         try:
             image = Image.open(image_path).convert('RGB')
-            inputs = self.processor(images=image, return_tensors="pt")
+            # 绕过版本Bug：传入一个假文本(dummy)强行激活完整的 CLIP 模型
+            inputs = self.processor(images=image, text=["dummy"], return_tensors="pt", padding=True)
             
             with torch.no_grad():
-                image_features = self.model.get_image_features(**inputs)
-                image_features = F.normalize(image_features, p=2, dim=1)
+                outputs = self.model(**inputs)
+                image_features = outputs.image_embeds  # 直接提取标准的跨模态特征
             
             return image_features.cpu().numpy().flatten()
         except Exception as e:
@@ -196,13 +197,15 @@ class CLIPImageRetriever:
             return self.simple_encoder.encode_image(image_path)
     
     def _encode_text_clip(self, text: str) -> np.ndarray:
-        """Encode text using CLIP."""
+        """Encode text using CLIP (Version-Robust Method)."""
         try:
-            inputs = self.processor(text=text, return_tensors="pt", truncation=True, max_length=77)
+            # 绕过版本Bug：传入一张纯黑假图像强行激活完整的 CLIP 模型
+            dummy_image = Image.new('RGB', (224, 224), (0, 0, 0))
+            inputs = self.processor(text=[text], images=dummy_image, return_tensors="pt", padding=True, truncation=True, max_length=77)
             
             with torch.no_grad():
-                text_features = self.model.get_text_features(**inputs)
-                text_features = F.normalize(text_features, p=2, dim=1)
+                outputs = self.model(**inputs)
+                text_features = outputs.text_embeds  # 直接提取标准的跨模态特征
             
             return text_features.cpu().numpy().flatten()
         except Exception as e:

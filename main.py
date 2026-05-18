@@ -12,6 +12,7 @@ from bm25 import BM25Model
 from evaluator import RetrievalEvaluator
 from multimodal_retrieval import CLIPImageRetriever, create_sample_images
 from visualization import generate_all_visualizations
+from relevance_feedback import FeedbackStore
 
 
 def print_banner():
@@ -61,13 +62,50 @@ def print_search_results(results, show_highlights=True):
         return
     print(f"\n  共找到 {len(results)} 个结果:\n")
     for i, r in enumerate(results):
+        fb_mark = " ⭐(反馈优选)" if r.get("feedback_boosted") else ""
         print(f"  {'─' * 64}")
-        print(f"  [{i + 1}] 相关度: {r['score']:.4f}")
+        print(f"  [{i + 1}]{fb_mark} 相关度: {r['score']:.4f}")
         print(f"      标题: {r['title']}")
         print(f"      摘要: {r['snippet'][:120]}")
         print(f"      日期: {r['date']}")
         print(f"      URL:  {r['url']}")
     print(f"  {'─' * 64}\n")
+
+
+def rate_results_interactive(results, query_str, feedback_store):
+    """Let user rate search results and save feedback."""
+    print("\n  ── 对结果评分 ──────────────────────")
+    print("  格式: 1=5,3=1,5=4   (编号=分数)")
+    print("  分数: 5=非常相关 4=相关 3=一般 2=不太相关 1=完全不相关")
+    print("  直接回车或输入 skip / q 跳过评分")
+    user_input = input("  评分> ").strip()
+
+    if not user_input or user_input.lower() in ("skip", "q", "quit", "exit"):
+        return False
+
+    ratings = {}
+    for part in user_input.split(","):
+        part = part.strip()
+        if "=" in part:
+            try:
+                idx_str, rating_str = part.split("=", 1)
+                idx = int(idx_str.strip())
+                rating = int(rating_str.strip())
+                if 1 <= idx <= len(results) and 1 <= rating <= 5:
+                    doc_id = results[idx - 1]["id"]
+                    ratings[doc_id] = rating
+            except (ValueError, IndexError):
+                pass
+
+    if ratings:
+        feedback_store.record_batch(ratings, query_str)
+        liked = sum(1 for r in ratings.values() if r >= 4)
+        disliked = sum(1 for r in ratings.values() if r <= 2)
+        print(f"  已记录 {len(ratings)} 条评分 (相关:{liked}, 不相关:{disliked})")
+        print(f"  反馈已保存，下次搜索时自动优化排序。")
+        return True
+    print("  未识别有效评分格式，已跳过。")
+    return False
 
 
 def do_async_crawl():
@@ -115,7 +153,7 @@ def do_build_index():
     return index
 
 
-def do_search_vsm(query_str, index=None, preprocessor=None, top_k=20):
+def do_search_vsm(query_str, index=None, preprocessor=None, top_k=20, feedback_store=None):
     """Search using TF-IDF VSM."""
     if index is None:
         index = load_index()
@@ -131,11 +169,17 @@ def do_search_vsm(query_str, index=None, preprocessor=None, top_k=20):
     
     tokens = preprocessor.segment(query_str)
     vsm = VectorSpaceModel(index)
-    results = vsm.search(tokens, top_k=top_k)
+    if feedback_store:
+        results = vsm.search_with_feedback(tokens, feedback_store, top_k=top_k)
+    else:
+        results = vsm.search(tokens, top_k=top_k)
+    print_search_results(results)
+    if feedback_store and results:
+        rate_results_interactive(results, query_str, feedback_store)
     return results
 
 
-def do_search_bm25(query_str, index=None, preprocessor=None, top_k=20):
+def do_search_bm25(query_str, index=None, preprocessor=None, top_k=20, feedback_store=None):
     """Search using BM25 algorithm."""
     if index is None:
         index = load_index()
@@ -151,7 +195,13 @@ def do_search_bm25(query_str, index=None, preprocessor=None, top_k=20):
     
     tokens = preprocessor.segment(query_str)
     bm25 = BM25Model(index)
-    results = bm25.search(tokens, top_k=top_k)
+    if feedback_store:
+        results = bm25.search_with_feedback(tokens, feedback_store, top_k=top_k)
+    else:
+        results = bm25.search(tokens, top_k=top_k)
+    print_search_results(results)
+    if feedback_store and results:
+        rate_results_interactive(results, query_str, feedback_store)
     return results
 
 
@@ -208,7 +258,7 @@ def do_multimodal_search(query_str=None):
     # Initialize/create sample images
     create_sample_images()
     
-    retriever = CLIPImageRetriever(use_clip=False)  # Fallback for compatibility
+    retriever = CLIPImageRetriever(use_clip=True)  # Fallback for compatibility
     retriever.index_images()
     
     if query_str is None:
@@ -232,8 +282,8 @@ def do_multimodal_search(query_str=None):
         print(f"      路径: {r['path']}")
 
 
-def interactive_query(index=None, preprocessor=None):
-    """Interactive query mode with algorithm selection."""
+def interactive_query(index=None, preprocessor=None, feedback_store=None):
+    """Interactive query mode with algorithm selection and feedback loop."""
     if index is None:
         index = load_index()
         if index is None:
@@ -246,15 +296,27 @@ def interactive_query(index=None, preprocessor=None):
     if preprocessor is None:
         preprocessor = TextPreprocessor()
     
+    if feedback_store is None:
+        feedback_store = FeedbackStore()
+    
+    vsm = VectorSpaceModel(index)
+    bm25 = BM25Model(index)
+    
     print("\n" + "=" * 70)
-    print("  交互式查询模式")
-    print("  输入 'vsm' 或 'bm25' 切换算法，输入 'quit' 退出")
+    print("  交互式查询模式 (支持反馈优化)")
+    print("  输入 'vsm' / 'bm25' 切换算法  |  'fb' 反馈模式")
+    print("  输入 'rate 1=5,3=2' 评分结果 |  'stats' 反馈统计")
+    print("  输入 'quit' 退出")
     print("=" * 70)
     
-    algorithm = "vsm"  # Default
+    algorithm = "vsm"
+    use_feedback = False
     
     while True:
-        print(f"\n当前算法: {algorithm.upper()}")
+        fb_stats = feedback_store.get_feedback_stats()
+        fb_info = f" [反馈: {fb_stats['total_ratings']}条]" if fb_stats['total_ratings'] > 0 else ""
+        print(f"\n当前算法: {algorithm.upper()}{fb_info}"
+              f"{' + 反馈优化' if use_feedback else ''}")
         query_str = input("查询> ").strip()
         
         if not query_str:
@@ -269,22 +331,48 @@ def interactive_query(index=None, preprocessor=None):
             algorithm = "bm25"
             print("  已切换至 BM25 算法")
             continue
+        if query_str.lower() == "fb":
+            use_feedback = not use_feedback
+            state = "开启" if use_feedback else "关闭"
+            print(f"  反馈优化已{state}")
+            continue
+        if query_str.lower() == "stats":
+            stats = feedback_store.get_feedback_stats()
+            print(f"\n  反馈统计:")
+            print(f"    总评分: {stats['total_ratings']} | 已评文档: {stats['rated_docs']}")
+            print(f"    平均分: {stats['avg_rating']:.2f}/5 | 收藏: {stats['liked_docs']}篇")
+            print(f"    有反馈查询: {stats['queries_with_feedback']} | 更新: {stats['last_updated'][:19]}")
+            continue
+        if query_str.lower().startswith("rate"):
+            print("  请先执行查询后再评分。")
+            continue
         
         tokens = preprocessor.segment(query_str)
         print(f"分词结果: {' / '.join(tokens)}")
         
         if algorithm == "vsm":
-            vsm = VectorSpaceModel(index)
-            results = vsm.search(tokens, top_k=20)
+            if use_feedback:
+                results = vsm.search_with_feedback(tokens, feedback_store, top_k=20)
+            else:
+                results = vsm.search(tokens, top_k=20)
         else:
-            bm25 = BM25Model(index)
-            results = bm25.search(tokens, top_k=20)
+            if use_feedback:
+                results = bm25.search_with_feedback(tokens, feedback_store, top_k=20)
+            else:
+                results = bm25.search(tokens, top_k=20)
         
         print_search_results(results)
+        
+        if results and use_feedback:
+            rated = rate_results_interactive(results, query_str, feedback_store)
+            if rated:
+                print(f"\n  *** 反馈已应用！输入查询再次搜索查看优化效果 ***")
+        elif results:
+            print("  提示: 输入 'fb' 开启反馈模式后可对结果评分并优化搜索。")
 
 
-def do_evaluation(index=None, preprocessor=None):
-    """Interactive evaluation with Precision@10 and Recall."""
+def do_evaluation(index=None, preprocessor=None, feedback_store=None):
+    """Interactive evaluation with Precision@10 and Recall + feedback loop."""
     if index is None:
         index = load_index()
         if index is None:
@@ -297,8 +385,11 @@ def do_evaluation(index=None, preprocessor=None):
     if preprocessor is None:
         preprocessor = TextPreprocessor()
     
+    if feedback_store is None:
+        feedback_store = FeedbackStore()
+    
     vsm = VectorSpaceModel(index)
-    evaluator = RetrievalEvaluator(vsm, preprocessor)
+    evaluator = RetrievalEvaluator(vsm, preprocessor, feedback_store)
     evaluator.interactive_evaluation()
 
 
@@ -373,6 +464,12 @@ def main():
     
     index = None
     preprocessor = TextPreprocessor()
+    feedback_store = FeedbackStore()
+    
+    fb_stats = feedback_store.get_feedback_stats()
+    if fb_stats['total_ratings'] > 0:
+        print(f"[Info] 已加载反馈数据: {fb_stats['total_ratings']} 条评分, "
+              f"{fb_stats['rated_docs']} 篇文档")
     
     # Auto-load if data exists
     if os.path.exists(DOCUMENTS_FILE) and os.path.exists(INDEX_FILE):
@@ -382,7 +479,8 @@ def main():
         if index and documents:
             index.documents = documents
             print(f"[Info] 已加载 {len(documents)} 篇文档和索引。")
-            print(f"[Info] 支持算法: TF-IDF, BM25, 跨模态检索\n")
+            print(f"[Info] 支持算法: TF-IDF, BM25, 跨模态检索 "
+                  f"(反馈: {'✓' if fb_stats['total_ratings'] > 0 else '无'})\n")
     
     while True:
         print_menu()
@@ -395,21 +493,19 @@ def main():
         elif choice == "3":
             query_str = input("\n请输入查询关键词: ").strip()
             if query_str:
-                results = do_search_vsm(query_str, index, preprocessor)
-                print_search_results(results)
+                do_search_vsm(query_str, index, preprocessor, feedback_store=feedback_store)
         elif choice == "4":
             query_str = input("\n请输入查询关键词 (BM25): ").strip()
             if query_str:
-                results = do_search_bm25(query_str, index, preprocessor)
-                print_search_results(results)
+                do_search_bm25(query_str, index, preprocessor, feedback_store=feedback_store)
         elif choice == "5":
             do_algorithm_comparison(index, preprocessor)
         elif choice == "6":
             do_multimodal_search()
         elif choice == "7":
-            interactive_query(index, preprocessor)
+            interactive_query(index, preprocessor, feedback_store)
         elif choice == "8":
-            do_evaluation(index, preprocessor)
+            do_evaluation(index, preprocessor, feedback_store)
         elif choice == "9":
             do_generate_charts()
         elif choice == "10":

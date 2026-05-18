@@ -1,6 +1,7 @@
 import json
 import os
 from config import EVAL_QUERIES_FILE
+from relevance_feedback import FeedbackStore
 
 
 DEFAULT_EVAL_QUERIES = [
@@ -58,11 +59,12 @@ DEFAULT_EVAL_QUERIES = [
 
 
 class RetrievalEvaluator:
-    """Manual evaluation of retrieval results."""
+    """Manual evaluation of retrieval results with feedback-driven optimization."""
 
-    def __init__(self, vsm_model, preprocessor):
+    def __init__(self, vsm_model, preprocessor, feedback_store=None):
         self.vsm = vsm_model
         self.preprocessor = preprocessor
+        self.feedback = feedback_store or FeedbackStore()
         self.eval_queries = []
         self._load_eval_queries()
 
@@ -83,13 +85,87 @@ class RetrievalEvaluator:
         tokens = self.preprocessor.segment(query_str)
         return self.vsm.search(tokens, top_k=top_k)
 
+    def run_search_with_feedback(self, query_str, top_k=10):
+        tokens = self.preprocessor.segment(query_str)
+        return self.vsm.search_with_feedback(tokens, self.feedback, top_k=top_k)
+
+    def _rate_results_interactive(self, results, query_str):
+        """Interactive rating interface for a set of results.
+        
+        Returns dict: {doc_id: rating (1-5)}
+        """
+        print(f"\n查询: \"{query_str}\"")
+        print(f"检索结果 (Top {len(results)}):")
+        for j, r in enumerate(results):
+            fb_mark = " ⭐" if r.get("feedback_boosted") else ""
+            print(f"\n  [{j + 1}]{fb_mark} 相关度: {r['score']:.4f}")
+            print(f"      标题: {r['title'][:60]}")
+            print(f"      摘要: {r['snippet'][:80]}")
+            print(f"      日期: {r['date']}")
+            print(f"      URL: {r['url'][:80]}")
+
+        print("\n请输入评分（格式如: 1=5, 3=1, 5=4）")
+        print("  5=非常相关  4=相关  3=一般  2=不太相关  1=不相关")
+        print("  或者输入 'skip' 跳过，'quit' 退出。")
+        user_input = input("评分> ").strip()
+
+        ratings = {}
+        if user_input.lower() == "quit":
+            return None
+        elif user_input.lower() == "skip":
+            return ratings
+
+        for part in user_input.split(","):
+            part = part.strip()
+            if "=" in part:
+                try:
+                    idx_str, rating_str = part.split("=", 1)
+                    idx = int(idx_str.strip())
+                    rating = int(rating_str.strip())
+                    if 1 <= idx <= len(results) and 1 <= rating <= 5:
+                        doc_id = results[idx - 1]["id"]
+                        ratings[doc_id] = rating
+                except (ValueError, IndexError):
+                    pass
+        return ratings
+
     def interactive_evaluation(self):
-        """Interactive interface for manually evaluating retrieval results."""
+        """Interactive evaluation with feedback loop and before/after comparison."""
         print("\n" + "=" * 70)
-        print("  检索结果人工评价系统")
+        print("  检索结果人工评价系统 (带反馈闭环)")
         print("=" * 70)
-        print(f"共 {len(self.eval_queries)} 个评测查询")
-        print()
+
+        fb_stats = self.feedback.get_feedback_stats()
+        print(f"已有反馈数据: {fb_stats['total_ratings']} 条评分, "
+              f"{fb_stats['rated_docs']} 篇文档, "
+              f"{fb_stats['liked_docs']} 篇收藏")
+
+        # Show preset queries
+        print(f"\n当前评测查询 ({len(self.eval_queries)} 个):")
+        for i, eq in enumerate(self.eval_queries):
+            has_fb = " [已有评价]" if eq.get("relevant_docs") else ""
+            print(f"  [{i + 1}] {eq['query']}{has_fb}")
+
+        print(f"\n{'─' * 70}")
+        print("模式: [1] 逐题评价 + 反馈优化  [2] 自定义查询  [3] 反馈效果对比  [4] 查看统计")
+        mode = input("选择模式> ").strip()
+
+        if mode == "2":
+            query_str = input("输入自定义查询: ").strip()
+            if query_str:
+                self._evaluate_custom_query(query_str)
+        elif mode == "3":
+            self._compare_feedback_effect()
+        elif mode == "4":
+            self._show_feedback_stats()
+        else:
+            self._evaluate_preset_queries()
+
+    def _evaluate_preset_queries(self):
+        """Evaluate all preset queries with feedback."""
+        total_before_p = 0
+        total_after_p = 0
+        valid = 0
 
         for i, eq in enumerate(self.eval_queries):
             print(f"\n{'─' * 70}")
@@ -97,41 +173,147 @@ class RetrievalEvaluator:
             print(f"描述: {eq['description']}")
             print(f"{'─' * 70}")
 
-            results = self.run_search(eq["query"], top_k=10)
-            if not results:
+            # Run search WITHOUT feedback
+            results_before = self.run_search(eq["query"], top_k=10)
+            if not results_before:
                 print("  无检索结果。")
                 continue
 
-            print(f"\n检索结果 (Top {len(results)}):")
-            for j, r in enumerate(results):
-                print(f"\n  [{j + 1}] 相关度: {r['score']:.4f}")
-                print(f"      标题: {r['title'][:60]}")
-                print(f"      摘要: {r['snippet'][:80]}")
-                print(f"      日期: {r['date']}")
-                print(f"      URL: {r['url'][:80]}")
+            # Run search WITH feedback
+            results_after = self.run_search_with_feedback(eq["query"], top_k=10)
 
-            print("\n请评价以上结果的相关性（输入相关文档编号，用逗号分隔，如 1,3,5）：")
-            print("或者输入 'skip' 跳过，'quit' 退出评价。")
-            user_input = input(">>> ").strip()
-
-            if user_input.lower() == "quit":
+            # Show results (feedback-optimized)
+            ratings = self._rate_results_interactive(results_after, eq["query"])
+            if ratings is None:
                 break
-            elif user_input.lower() == "skip":
+            if not ratings:
                 continue
-            elif user_input:
-                try:
-                    relevant = [int(x.strip()) for x in user_input.split(",") if x.strip().isdigit()]
-                    eq["relevant_docs"] = [results[i - 1]["id"] for i in relevant if 1 <= i <= len(results)]
-                    print(f"  已记录 {len(eq['relevant_docs'])} 个相关文档。")
-                except (ValueError, IndexError):
-                    print("  输入格式错误，跳过。")
 
+            # Save feedback
+            self.feedback.record_batch(ratings, eq["query"])
+
+            # Update preset query with relevant doc IDs
+            relevant = [doc_id for doc_id, r in ratings.items() if r >= 4]
+            eq["relevant_docs"] = relevant
             self._save_eval_queries()
 
+            # Compute before/after precision
+            relevant_set = set(relevant)
+            before_hits = len(relevant_set & set(r["id"] for r in results_before))
+            after_hits = len(relevant_set & set(r["id"] for r in results_after))
+            p_before = before_hits / len(results_before) if results_before else 0
+            p_after = after_hits / len(results_after) if results_after else 0
+
+            total_before_p += p_before
+            total_after_p += p_after
+            valid += 1
+
+            print(f"\n  本次评价: 标记了 {len(ratings)} 个评分 ({len(relevant)} 个相关)")
+            if p_before != p_after:
+                delta = p_after - p_before
+                direction = "↑" if delta > 0 else "↓"
+                print(f"  反馈效果: Precision {p_before:.2%} → {p_after:.2%} ({direction}{abs(delta):.1%})")
+            print(f"  累计反馈: {self.feedback.get_feedback_stats()['total_ratings']} 条评分")
+
+        if valid > 0:
+            print(f"\n{'─' * 50}")
+            print(f"评测完成！共评价 {valid} 个查询")
+            print(f"反馈优化前 平均 Precision@10: {total_before_p / valid:.2%}")
+            print(f"反馈优化后 平均 Precision@10: {total_after_p / valid:.2%}")
+            if total_before_p > 0:
+                improvement = (total_after_p - total_before_p) / total_before_p * 100
+                print(f"相对提升: {improvement:+.1f}%")
+
+    def _evaluate_custom_query(self, query_str):
+        """Evaluate a single custom query with feedback."""
+        print(f"\n{'─' * 70}")
+        print(f"自定义查询: \"{query_str}\"")
+
+        results_before = self.run_search(query_str, top_k=10)
+        results_after = self.run_search_with_feedback(query_str, top_k=10)
+
+        ratings = self._rate_results_interactive(results_after, query_str)
+        if ratings is None or not ratings:
+            return
+
+        self.feedback.record_batch(ratings, query_str)
+
+        relevant = [doc_id for doc_id, r in ratings.items() if r >= 4]
+
+        relevant_set = set(relevant)
+        before_hits = len(relevant_set & set(r["id"] for r in results_before))
+        after_hits = len(relevant_set & set(r["id"] for r in results_after))
+        p_before = before_hits / len(results_before) if results_before else 0
+        p_after = after_hits / len(results_after) if results_after else 0
+
+        print(f"\n反馈优化前 Precision@10: {p_before:.2%}")
+        print(f"反馈优化后 Precision@10: {p_after:.2%}")
+
+        self.eval_queries.append({
+            "query": query_str,
+            "description": "用户自定义查询",
+            "relevant_docs": relevant,
+        })
+        self._save_eval_queries()
+
+    def _compare_feedback_effect(self):
+        """Compare search results before/after feedback for all evaluated queries."""
+        print("\n" + "=" * 70)
+        print("  反馈效果对比 (Before vs After)")
+        print("=" * 70)
+
+        tested = 0
+        for eq in self.eval_queries:
+            if not eq.get("relevant_docs"):
+                continue
+            tested += 1
+            relevant_set = set(eq["relevant_docs"])
+
+            results_before = self.run_search(eq["query"], top_k=10)
+            results_after = self.run_search_with_feedback(eq["query"], top_k=10)
+
+            before_hits = len(relevant_set & set(r["id"] for r in results_before))
+            after_hits = len(relevant_set & set(r["id"] for r in results_after))
+            p_before = before_hits / len(results_before) if results_before else 0
+            p_after = after_hits / len(results_after) if results_after else 0
+
+            delta = p_after - p_before
+            indicator = "✓ 提升" if delta > 0 else ("=" if delta == 0 else "✗ 下降")
+            print(f"\n  {eq['query']}")
+            print(f"    反馈前: {p_before:.2%} ({before_hits} hits)")
+            print(f"    反馈后: {p_after:.2%} ({after_hits} hits)  {indicator}")
+
+        if tested == 0:
+            print("  尚无评价数据，请先进行评价。")
+
+    def _show_feedback_stats(self):
+        """Display comprehensive feedback statistics."""
+        stats = self.feedback.get_feedback_stats()
+        print("\n" + "=" * 70)
+        print("  反馈数据统计")
+        print("=" * 70)
+        print(f"  总评分数: {stats['total_ratings']}")
+        print(f"  已评价文档数: {stats['rated_docs']}")
+        print(f"  平均评分: {stats['avg_rating']:.2f}/5.0")
+        print(f"  收藏文档 (≥4分): {stats['liked_docs']}")
+        print(f"  不相关文档 (≤2分): {stats['disliked_docs']}")
+        print(f"  有反馈的查询数: {stats['queries_with_feedback']}")
+        print(f"  最后更新: {stats['last_updated'][:19]}")
+
+        liked = self.feedback.get_liked_docs()
+        disliked = self.feedback.get_disliked_docs()
+        if liked:
+            print(f"\n  收藏文档 Top 5:")
+            for doc_id in sorted(liked, key=lambda d: self.feedback.get_document_boost(d), reverse=True)[:5]:
+                boost = self.feedback.get_document_boost(doc_id)
+                entry = self.feedback.data["doc_ratings"].get(str(doc_id), {})
+                print(f"    doc#{doc_id}: avg={entry.get('avg_rating', 0):.1f}/5, "
+                      f"ratings={entry.get('rating_count', 0)}, boost={boost:+.3f}")
+
+    def show_metrics_summary(self):
         self._compute_metrics()
 
     def _compute_metrics(self):
-        """Compute precision@k for each query."""
         print("\n" + "=" * 70)
         print("  评测结果汇总")
         print("=" * 70)
@@ -165,11 +347,3 @@ class RetrievalEvaluator:
             print(f"\n{'─' * 50}")
             print(f"平均准确率 (Avg Precision@10): {total_precision / valid:.2%}")
             print(f"平均召回率 (Avg Recall): {total_recall / valid:.2%}")
-
-    def show_metrics_summary(self):
-        """Display evaluation metrics summary."""
-        self._compute_metrics()
-
-
-if __name__ == "__main__":
-    print("Evaluation module - import and use with VSM model.")
