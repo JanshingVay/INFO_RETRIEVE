@@ -2,8 +2,9 @@ __pycache__
 venv
 
 # Data directory - auto-generated at runtime
-data/
-
+/data/
+/data/*
+!/data/.gitkeep
 # IDE
 .vscode/
 .idea/
