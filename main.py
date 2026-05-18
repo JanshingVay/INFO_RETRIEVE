@@ -4,14 +4,12 @@ import sys
 import time
 
 from config import DOCUMENTS_FILE, INDEX_FILE
-from crawler import WebCrawler
 from async_crawler import run_async_crawl
 from preprocessor import TextPreprocessor
 from inverted_index import InvertedIndex
 from vsm import VectorSpaceModel
-from bm25 import BM25Model, AlgorithmComparator
 from evaluator import RetrievalEvaluator
-from multimodal_retrieval import CLIPImageRetriever, CrossModalComparison, create_sample_images
+from multimodal_retrieval import CLIPImageRetriever, create_sample_images
 from visualization import generate_all_visualizations
 
 

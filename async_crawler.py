@@ -225,6 +225,9 @@ class AsyncWebCrawler:
                     break
                 continue
             
+            if article is None:
+                break
+            
             if article["url"] not in self.seen_urls:
                 doc_id = len(self.documents)
                 self.documents.append({
