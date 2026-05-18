@@ -2,7 +2,10 @@
   {
     "query": "人工智能技术发展",
     "description": "关于人工智能技术发展和趋势的文章",
-    "relevant_docs": []
+    "relevant_docs": [
+      12,
+      16
+    ]
   },
   {
     "query": "5G通信网络",

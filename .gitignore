@@ -1,2 +1,16 @@
 __pycache__
 venv
+
+# Data directory - auto-generated at runtime
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

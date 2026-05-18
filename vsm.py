@@ -1,5 +1,4 @@
 import math
-import heapq
 from config import VSM_TOP_K
 
 

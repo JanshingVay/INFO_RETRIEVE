@@ -8,6 +8,7 @@ from async_crawler import run_async_crawl
 from preprocessor import TextPreprocessor
 from inverted_index import InvertedIndex
 from vsm import VectorSpaceModel
+from bm25 import BM25Model
 from evaluator import RetrievalEvaluator
 from multimodal_retrieval import CLIPImageRetriever, create_sample_images
 from visualization import generate_all_visualizations
@@ -16,9 +17,9 @@ from visualization import generate_all_visualizations
 def print_banner():
     print("""
 ╔══════════════════════════════════════════════════════════════════╗
-║           信息检索系统 - Information Retrieval System            ║
-║  跨模态检索 + BM25优化 + 高并发爬虫 + 可视化评价                  ║
-║  Cross-Modal + BM25 + Async Crawler + Visualization             ║
+║           信息检索系统 - Information Retrieval System              ║
+║   跨模态检索 + BM25优化 + 高并发爬虫 + 可视化评价                      ║
+║  Cross-Modal + BM25 + Async Crawler + Visualization              ║
 ╚══════════════════════════════════════════════════════════════════╝
 """)
 
