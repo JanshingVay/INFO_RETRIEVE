@@ -1,6 +1,6 @@
 __pycache__
 venv
-
+.pytest_cache
 # Data directory - auto-generated at runtime
 /data/*
 !/data/.gitkeep
@@ -11,7 +11,7 @@ venv
 *.swp
 *.swo
 *~
-
+data/
 # OS
 .DS_Store
 Thumbs.db
