@@ -8,9 +8,20 @@ matplotlib>=3.5.0
 numpy>=1.21.0
 Pillow>=9.0.0
 torch>=2.0.0
-transformers>=4.30.0
 ftfy>=6.1.0
 regex>=2022.0.0
 tqdm>=4.64.0
 pytest>=7.0.0
 pytest-cov>=4.0.0
+
+# 多模态基础底层算子
+timm
+torchvision
+einops
+scikit-learn
+opencv-python>=4.8.0
+
+# 🚀 激进且优雅的 5.x 全新大版本多模态底座
+tokenizers>=0.23.1
+transformers==5.9.0
+sentence-transformers==3.3.0

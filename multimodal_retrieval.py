@@ -1,436 +1,472 @@
 """
-Cross-Modal Information Retrieval Module
-Text-to-Image Retrieval using CLIP (Contrastive Language-Image Pre-training)
+Cross-Modal Multimedia Retrieval Module
+Text-to-Image + Text-to-Video Retrieval using Jina CLIP v2 + sentence-transformers.
 
-This module enables:
-1. Text-to-Image retrieval: Input natural language query, retrieve relevant images
-2. Image-to-Text retrieval: Input image, retrieve relevant text documents
-3. Unified semantic space: Both modalities embedded in shared vector space
+Capabilities:
+1. Text-to-Image: natural language query -> relevant images
+2. Text-to-Video: natural language query -> relevant videos (frame-level encoding)
+3. Unified semantic space via Jina CLIP v2 (1024-dim, 90+ languages)
 
-CLIP Architecture:
-- Text Encoder: Transformer-based, outputs text embeddings
-- Image Encoder: Vision Transformer (ViT) or ResNet, outputs image embeddings
-- Contrastive Learning: Aligns text and image representations in shared space
-
-References:
-[1] Radford, A., et al. (2021). Learning Transferable Visual Models From Natural 
-    Language Supervision. ICML 2021.
-[2] https://github.com/openai/CLIP
+Architecture:
+- sentence-transformers: high-level text encoding API
+- Jina CLIP v2 (transformers): image/video frame encoding via get_image_features()
+- OpenCV: video frame extraction
 """
+
+# ========== Transformers 5.x clip_loss 兼容补丁 ==========
+try:
+    import torch
+    import transformers.models.clip.modeling_clip as hf_clip_mod
+
+    # 如果模块里没有 clip_loss，手动挂载官方原版实现
+    if not hasattr(hf_clip_mod, "clip_loss"):
+        def clip_loss(similarity: torch.Tensor) -> torch.Tensor:
+            import torch.nn.functional as F
+            caption_loss = F.cross_entropy(similarity, torch.arange(similarity.size(0), device=similarity.device))
+            image_loss = F.cross_entropy(similarity.T, torch.arange(similarity.size(0), device=similarity.device))
+            return (caption_loss + image_loss) / 2.0
+
+        # 强行挂载，让外部导入能找到
+        hf_clip_mod.clip_loss = clip_loss
+
+except Exception:
+    # 静默失败，不影响主程序
+    pass
 
 import os
 import json
+import pickle
 import numpy as np
 from PIL import Image
-import pickle
 from typing import List, Dict, Tuple, Optional
 import warnings
 
-# Try to import torch and transformers for CLIP
-CLIP_AVAILABLE = False
-try:
-    import torch
-    import torch.nn.functional as F
-    from transformers import CLIPProcessor, CLIPModel, CLIPTokenizer
-    CLIP_AVAILABLE = True
-except ImportError:
-    warnings.warn("CLIP dependencies not available. Using fallback mode.")
+import torch
 
+from sentence_transformers import SentenceTransformer
 from config import DATA_DIR
 
-# Paths for multimodal data
 IMAGE_DIR = os.path.join(DATA_DIR, "images")
+VIDEO_DIR = os.path.join(DATA_DIR, "videos")
 IMAGE_INDEX_FILE = os.path.join(DATA_DIR, "image_index.pkl")
 IMAGE_METADATA_FILE = os.path.join(DATA_DIR, "image_metadata.json")
+VIDEO_INDEX_FILE = os.path.join(DATA_DIR, "video_index.pkl")
+VIDEO_METADATA_FILE = os.path.join(DATA_DIR, "video_metadata.json")
+
+MODEL_NAME = "jinaai/jina-clip-v2"
+EMBEDDING_DIM = 1024
+VIDEO_FPS = 1.0
+VIDEO_MAX_FRAMES = 60
+VIDEO_MIN_FRAMES = 5
 
 
-class SimpleImageEncoder:
-    """
-    Fallback image encoder using simple features when CLIP is unavailable.
-    Uses color histogram + edge detection features.
-    """
-    
-    def __init__(self, feature_dim=512):
-        self.feature_dim = feature_dim
-    
-    def encode_image(self, image_path: str) -> np.ndarray:
-        """Extract simple visual features from image."""
-        try:
-            img = Image.open(image_path).convert('RGB')
-            img = img.resize((224, 224))
-            arr = np.array(img)
-            
-            # Color histogram features (3 channels * 16 bins = 48 dims)
-            hist_features = []
-            for i in range(3):
-                hist, _ = np.histogram(arr[:, :, i].flatten(), bins=16, range=(0, 256))
-                hist = hist / hist.sum() if hist.sum() > 0 else hist
-                hist_features.extend(hist)
-            
-            # Simple edge features using gradient
-            gray = np.mean(arr, axis=2)
-            grad_x = np.abs(np.diff(gray, axis=1)).mean()
-            grad_y = np.abs(np.diff(gray, axis=0)).mean()
-            edge_features = [grad_x, grad_y]
-            
-            # Combine and pad to target dimension
-            features = np.array(hist_features + edge_features)
-            if len(features) < self.feature_dim:
-                features = np.pad(features, (0, self.feature_dim - len(features)))
-            else:
-                features = features[:self.feature_dim]
-            
-            # Normalize
-            norm = np.linalg.norm(features)
-            if norm > 0:
-                features = features / norm
-            
-            return features.astype(np.float32)
-        except Exception as e:
-            print(f"Error encoding image {image_path}: {e}")
-            return np.zeros(self.feature_dim, dtype=np.float32)
-    
-    def encode_text(self, text: str) -> np.ndarray:
-        """Simple text encoding based on keyword matching."""
-        # Keywords for different image categories
-        category_keywords = {
-            "technology": ["科技", "技术", "人工智能", "AI", "computer", "芯片", "半导体", "5G", "网络", "digital"],
-            "nature": ["自然", "风景", "山水", "森林", "海洋", "动物", "植物", "nature", "landscape"],
-            "city": ["城市", "建筑", "高楼", "街道", "交通", "urban", "city", "building"],
-            "people": ["人物", "人脸", "肖像", "人群", "person", "people", "portrait", "human"],
-            "food": ["食物", "美食", "餐厅", "烹饪", "food", "restaurant", "cooking"],
-        }
-        
-        text_lower = text.lower()
-        scores = []
-        for category, keywords in category_keywords.items():
-            score = sum(1 for kw in keywords if kw in text or kw in text_lower)
-            scores.append(score)
-        
-        # Pad to feature dimension
-        features = np.array(scores + [0.0] * (self.feature_dim - len(scores)))
-        norm = np.linalg.norm(features)
-        if norm > 0:
-            features = features / norm
-        return features.astype(np.float32)
+def _extract_video_frames(video_path: str, fps: float = VIDEO_FPS) -> List[np.ndarray]:
+    try:
+        import cv2
+    except ImportError:
+        raise ImportError("opencv-python is required for video processing. Install: pip install opencv-python")
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"[Multimodal] Cannot open video: {video_path}")
+        return []
+
+    video_fps = cap.get(cv2.CAP_PROP_FPS)
+    if video_fps <= 0:
+        video_fps = 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration = total_frames / video_fps if video_fps > 0 else 0
+
+    sample_interval = max(1, int(video_fps / fps))
+    max_samples = min(VIDEO_MAX_FRAMES, max(VIDEO_MIN_FRAMES, int(duration * fps)))
+
+    frames = []
+    frame_idx = 0
+    while len(frames) < max_samples:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if frame_idx % sample_interval == 0:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(frame_rgb)
+        frame_idx += 1
+
+    cap.release()
+
+    if len(frames) < VIDEO_MIN_FRAMES and duration > 0:
+        cap = cv2.VideoCapture(video_path)
+        step = max(1, total_frames // VIDEO_MIN_FRAMES)
+        for i in range(VIDEO_MIN_FRAMES):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, i * step)
+            ret, frame = cap.read()
+            if ret:
+                frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        cap.release()
+
+    return frames
 
 
-class CLIPImageRetriever:
-    """
-    Cross-modal image retriever using CLIP or fallback encoding.
-    
-    Supports:
-    - Text-to-Image: Natural language query retrieves relevant images
-    - Image indexing: Build searchable index of local images
-    - Similarity ranking: Cosine similarity in shared embedding space
-    """
-    
-    def __init__(self, use_clip: bool = True):
-        self.use_clip = use_clip and CLIP_AVAILABLE
+class MultimodalRetriever:
+    def __init__(self, model_name: str = MODEL_NAME, device: str = None):
+        self.model_name = model_name
+        self.image_embeddings: Dict[str, np.ndarray] = {}
+        self.image_metadata: Dict[str, dict] = {}
+        self.video_embeddings: Dict[str, np.ndarray] = {}
+        self.video_metadata: Dict[str, dict] = {}
+
         self.model = None
-        self.processor = None
-        self.device = "cpu"
-        self.image_embeddings = {}
-        self.image_metadata = {}
-        self.simple_encoder = SimpleImageEncoder()
-        
-        if self.use_clip:
-            self._load_clip_model()
-        
-        # Ensure directories exist
+        self._clip_model = None
+        self._clip_processor = None
+
+        if device is None:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
+
+        self._load_model()
+
         os.makedirs(IMAGE_DIR, exist_ok=True)
+        os.makedirs(VIDEO_DIR, exist_ok=True)
         self._load_index()
-    
-    def _load_clip_model(self):
-        """Load pre-trained CLIP model."""
+
+    # ──────────────────── model loading ────────────────────
+
+    def _load_model(self):
+        print(f"[Multimodal] Loading Jina CLIP v2 via sentence-transformers...")
+        print(f"[Multimodal] Device: {self.device}")
         try:
-            print("[Multimodal] Loading CLIP model...")
-            # Use a smaller, faster model variant
-            model_name = "openai/clip-vit-base-patch32"  # 150MB vs 600MB for large
-            self.model = CLIPModel.from_pretrained(model_name)
-            self.processor = CLIPProcessor.from_pretrained(model_name)
-            self.model.eval()
-            print("[Multimodal] CLIP model loaded successfully.")
+            self.model = SentenceTransformer(
+                self.model_name,
+                trust_remote_code=True,
+                device=self.device,
+            )
+            self._clip_model = self.model._first_module().auto_model
+            self._clip_processor = self.model._first_module().processor
+            print("[Multimodal] Model loaded successfully. Embedding dim = 1024, 90+ languages.")
         except Exception as e:
-            print(f"[Multimodal] Failed to load CLIP: {e}")
-            print("[Multimodal] Falling back to simple encoder.")
-            self.use_clip = False
-    
+            print(f"[Multimodal] Failed via sentence-transformers: {e}")
+            self._load_model_fallback()
+
+    def _load_model_fallback(self):
+        print("[Multimodal] Falling back to transformers AutoModel...")
+        try:
+            from transformers import AutoModel, AutoProcessor
+            self.model = None
+            self._clip_model = AutoModel.from_pretrained(self.model_name, trust_remote_code=True)
+            self._clip_model.eval()
+            self._clip_processor = AutoProcessor.from_pretrained(self.model_name, trust_remote_code=True)
+            print("[Multimodal] Model loaded via transformers fallback.")
+        except Exception as e:
+            print(f"[Multimodal] FATAL: cannot load model: {e}")
+            raise e
+
+    # ──────────────────── text encoding ────────────────────
+
+    def encode_text(self, text: str) -> np.ndarray:
+        try:
+            if self.model is not None:
+                emb = self.model.encode(
+                    [text],
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
+                return emb[0].astype(np.float32)
+
+            return self._encode_text_clip(text)
+        except Exception as e:
+            print(f"[Multimodal] Text encoding error: {e}")
+            return np.zeros(EMBEDDING_DIM, dtype=np.float32)
+
+    def _encode_text_clip(self, text: str) -> np.ndarray:
+        inputs = self._clip_processor(text=[text], return_tensors="pt", padding=True, truncation=True)
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        with torch.no_grad():
+            features = self._clip_model.get_text_features(**inputs)
+        features = features / features.norm(p=2, dim=-1, keepdim=True)
+        return features.cpu().numpy().flatten().astype(np.float32)
+
+    # ──────────────────── image encoding ────────────────────
+
+    def encode_image(self, image_path: str) -> np.ndarray:
+        try:
+            image = Image.open(image_path).convert('RGB')
+            return self.encode_image_pil(image)
+        except Exception as e:
+            print(f"[Multimodal] Image encoding error ({image_path}): {e}")
+            return np.zeros(EMBEDDING_DIM, dtype=np.float32)
+
+    def encode_image_pil(self, image: Image.Image) -> np.ndarray:
+        try:
+            inputs = self._clip_processor(images=image, return_tensors="pt")
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            with torch.no_grad():
+                features = self._clip_model.get_image_features(**inputs)
+            features = features / features.norm(p=2, dim=-1, keepdim=True)
+            return features.cpu().numpy().flatten().astype(np.float32)
+        except Exception as e:
+            print(f"[Multimodal] PIL image encoding error: {e}")
+            return np.zeros(EMBEDDING_DIM, dtype=np.float32)
+
+    # ──────────────────── video encoding ────────────────────
+
+    def encode_video(self, video_path: str, fps: float = VIDEO_FPS) -> np.ndarray:
+        frames = _extract_video_frames(video_path, fps=fps)
+        if not frames:
+            print(f"[Multimodal] No frames extracted from {video_path}")
+            return np.zeros(EMBEDDING_DIM, dtype=np.float32)
+
+        frame_embeddings = []
+        for frame_arr in frames:
+            pil_img = Image.fromarray(frame_arr)
+            emb = self.encode_image_pil(pil_img)
+            frame_embeddings.append(emb)
+
+        video_emb = np.mean(frame_embeddings, axis=0)
+        norm = np.linalg.norm(video_emb)
+        if norm > 0:
+            video_emb = video_emb / norm
+        return video_emb.astype(np.float32)
+
+    # ──────────────────── index persistence ────────────────────
+
     def _load_index(self):
-        """Load existing image index."""
-        if os.path.exists(IMAGE_INDEX_FILE):
-            try:
-                with open(IMAGE_INDEX_FILE, "rb") as f:
-                    self.image_embeddings = pickle.load(f)
-                print(f"[Multimodal] Loaded {len(self.image_embeddings)} image embeddings.")
-            except Exception as e:
-                print(f"[Multimodal] Could not load index: {e}")
-        
-        if os.path.exists(IMAGE_METADATA_FILE):
-            try:
-                with open(IMAGE_METADATA_FILE, "r", encoding="utf-8") as f:
-                    self.image_metadata = json.load(f)
-            except Exception as e:
-                print(f"[Multimodal] Could not load metadata: {e}")
-    
+        for file, store, label in [
+            (IMAGE_INDEX_FILE, self.image_embeddings, "image embeddings"),
+            (VIDEO_INDEX_FILE, self.video_embeddings, "video embeddings"),
+        ]:
+            if os.path.exists(file):
+                try:
+                    with open(file, "rb") as f:
+                        store.update(pickle.load(f))
+                    print(f"[Multimodal] Loaded {len(store)} {label}.")
+                except Exception as e:
+                    print(f"[Multimodal] Could not load {label}: {e}")
+
+        for file, store, label in [
+            (IMAGE_METADATA_FILE, self.image_metadata, "image metadata"),
+            (VIDEO_METADATA_FILE, self.video_metadata, "video metadata"),
+        ]:
+            if os.path.exists(file):
+                try:
+                    with open(file, "r", encoding="utf-8") as f:
+                        store.update(json.load(f))
+                except Exception as e:
+                    print(f"[Multimodal] Could not load {label}: {e}")
+
     def _save_index(self):
-        """Save image index to disk."""
         with open(IMAGE_INDEX_FILE, "wb") as f:
             pickle.dump(self.image_embeddings, f)
         with open(IMAGE_METADATA_FILE, "w", encoding="utf-8") as f:
             json.dump(self.image_metadata, f, ensure_ascii=False, indent=2)
-    
-    def _encode_image_clip(self, image_path: str) -> np.ndarray:
-        """Encode image using CLIP (Version-Robust Method)."""
-        try:
-            image = Image.open(image_path).convert('RGB')
-            # 绕过版本Bug：传入一个假文本(dummy)强行激活完整的 CLIP 模型
-            inputs = self.processor(images=image, text=["dummy"], return_tensors="pt", padding=True)
-            
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-                image_features = outputs.image_embeds  # 直接提取标准的跨模态特征
-            
-            return image_features.cpu().numpy().flatten()
-        except Exception as e:
-            print(f"Error encoding image with CLIP: {e}")
-            return self.simple_encoder.encode_image(image_path)
-    
-    def _encode_text_clip(self, text: str) -> np.ndarray:
-        """Encode text using CLIP (Version-Robust Method)."""
-        try:
-            # 绕过版本Bug：传入一张纯黑假图像强行激活完整的 CLIP 模型
-            dummy_image = Image.new('RGB', (224, 224), (0, 0, 0))
-            inputs = self.processor(text=[text], images=dummy_image, return_tensors="pt", padding=True, truncation=True, max_length=77)
-            
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-                text_features = outputs.text_embeds  # 直接提取标准的跨模态特征
-            
-            return text_features.cpu().numpy().flatten()
-        except Exception as e:
-            print(f"Error encoding text with CLIP: {e}")
-            return self.simple_encoder.encode_text(text)
-    
-    def encode_image(self, image_path: str) -> np.ndarray:
-        """Encode image to embedding vector."""
-        if self.use_clip:
-            return self._encode_image_clip(image_path)
-        return self.simple_encoder.encode_image(image_path)
-    
-    def encode_text(self, text: str) -> np.ndarray:
-        """Encode text to embedding vector."""
-        if self.use_clip:
-            return self._encode_text_clip(text)
-        return self.simple_encoder.encode_text(text)
-    
-    def index_images(self, image_dir: str = None, extensions: Tuple[str] = ('.jpg', '.jpeg', '.png', '.webp')):
-        """
-        Index all images in directory.
-        
-        Args:
-            image_dir: Directory containing images (default: IMAGE_DIR)
-            extensions: Image file extensions to index
-        """
+        with open(VIDEO_INDEX_FILE, "wb") as f:
+            pickle.dump(self.video_embeddings, f)
+        with open(VIDEO_METADATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(self.video_metadata, f, ensure_ascii=False, indent=2)
+
+    # ──────────────────── indexing ────────────────────
+
+    def index_images(self, image_dir: str = None,
+                     extensions: Tuple[str, ...] = ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif')):
         image_dir = image_dir or IMAGE_DIR
-        print(f"[Multimodal] Indexing images from {image_dir}...")
-        
-        image_files = []
-        for ext in extensions:
-            image_files.extend([
-                os.path.join(image_dir, f) 
-                for f in os.listdir(image_dir) 
-                if f.lower().endswith(ext)
-            ])
-        
-        print(f"[Multimodal] Found {len(image_files)} images.")
-        
+        if not os.path.isdir(image_dir):
+            print(f"[Multimodal] Image directory not found: {image_dir}")
+            return
+
+        image_files = sorted(
+            os.path.join(image_dir, f) for f in os.listdir(image_dir)
+            if f.lower().endswith(extensions)
+        )
+        if not image_files:
+            print(f"[Multimodal] No images found in {image_dir}")
+            return
+
+        print(f"[Multimodal] Indexing {len(image_files)} images from {image_dir} (READ-ONLY)...")
+
         for i, img_path in enumerate(image_files):
             img_id = os.path.basename(img_path)
             if img_id in self.image_embeddings:
                 continue
-            
-            embedding = self.encode_image(img_path)
-            self.image_embeddings[img_id] = embedding
-            
-            # Extract metadata
+
+            self.image_embeddings[img_id] = self.encode_image(img_path)
+
             try:
                 with Image.open(img_path) as img:
-                    width, height = img.size
-                    format_type = img.format
-            except:
-                width, height, format_type = 0, 0, "unknown"
-            
+                    w, h = img.size
+                    fmt = img.format
+            except Exception:
+                w, h, fmt = 0, 0, "unknown"
+
             self.image_metadata[img_id] = {
-                "path": img_path,
-                "filename": img_id,
-                "width": width,
-                "height": height,
-                "format": format_type,
+                "path": img_path, "filename": img_id,
+                "width": w, "height": h, "format": fmt,
             }
-            
-            if (i + 1) % 10 == 0:
-                print(f"  Indexed {i + 1}/{len(image_files)} images...")
-        
+
+            if (i + 1) % 20 == 0 or i == len(image_files) - 1:
+                print(f"  Image [{i + 1}/{len(image_files)}]")
+
         self._save_index()
-        print(f"[Multimodal] Indexing complete. Total: {len(self.image_embeddings)} images.")
-    
-    def search(self, query_text: str, top_k: int = 5) -> List[Dict]:
-        """
-        Text-to-Image retrieval: Find images matching text query.
-        
-        Args:
-            query_text: Natural language query
-            top_k: Number of top results to return
-            
-        Returns:
-            List of result dicts with image metadata and similarity scores
-        """
+        print(f"[Multimodal] Image indexing done. Total: {len(self.image_embeddings)}")
+
+    def index_videos(self, video_dir: str = None,
+                     extensions: Tuple[str, ...] = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv')):
+        video_dir = video_dir or VIDEO_DIR
+        if not os.path.isdir(video_dir):
+            print(f"[Multimodal] Video directory not found: {video_dir}")
+            return
+
+        video_files = sorted(
+            os.path.join(video_dir, f) for f in os.listdir(video_dir)
+            if f.lower().endswith(extensions)
+        )
+        if not video_files:
+            print(f"[Multimodal] No videos found in {video_dir}")
+            return
+
+        print(f"[Multimodal] Indexing {len(video_files)} videos from {video_dir} (READ-ONLY)...")
+
+        for i, vid_path in enumerate(video_files):
+            vid_id = os.path.basename(vid_path)
+            if vid_id in self.video_embeddings:
+                continue
+
+            print(f"  Video [{i + 1}/{len(video_files)}]: {vid_id} (extracting frames...)")
+            self.video_embeddings[vid_id] = self.encode_video(vid_path)
+
+            file_size = os.path.getsize(vid_path)
+            self.video_metadata[vid_id] = {
+                "path": vid_path, "filename": vid_id,
+                "size_bytes": file_size,
+            }
+
+        self._save_index()
+        print(f"[Multimodal] Video indexing done. Total: {len(self.video_embeddings)}")
+
+    def index_all(self):
+        self.index_images()
+        self.index_videos()
+
+    # ──────────────────── search ────────────────────
+
+    def _cosine_search(self, query_emb: np.ndarray,
+                       embeddings: Dict[str, np.ndarray],
+                       metadata: Dict[str, dict],
+                       top_k: int, label: str) -> List[Dict]:
+        if not embeddings:
+            return []
+
+        results = []
+        for item_id, item_emb in embeddings.items():
+            sim = float(np.dot(query_emb, item_emb))
+            results.append((item_id, sim))
+
+        results.sort(key=lambda x: x[1], reverse=True)
+
+        output = []
+        for item_id, score in results[:top_k]:
+            meta = metadata.get(item_id, {})
+            entry = {
+                f"{label}_id": item_id,
+                "score": round(score, 6),
+                "path": meta.get("path", ""),
+            }
+            if label == "image":
+                entry.update({
+                    "width": meta.get("width", 0),
+                    "height": meta.get("height", 0),
+                    "format": meta.get("format", "unknown"),
+                })
+            elif label == "video":
+                entry["size_mb"] = round(meta.get("size_bytes", 0) / (1024 * 1024), 2)
+            output.append(entry)
+        return output
+
+    def search_images(self, query_text: str, top_k: int = 5) -> List[Dict]:
         if not self.image_embeddings:
             print("[Multimodal] No images indexed. Run index_images() first.")
             return []
-        
-        # Encode query
-        query_embedding = self.encode_text(query_text)
-        
-        # Compute similarities
-        results = []
-        for img_id, img_embedding in self.image_embeddings.items():
-            similarity = np.dot(query_embedding, img_embedding)
-            results.append((img_id, float(similarity)))
-        
-        # Sort by similarity
-        results.sort(key=lambda x: x[1], reverse=True)
-        top_results = results[:top_k]
-        
-        # Format output
-        output = []
-        for img_id, score in top_results:
-            metadata = self.image_metadata.get(img_id, {})
-            output.append({
-                "image_id": img_id,
-                "score": round(score, 6),
-                "path": metadata.get("path", ""),
-                "width": metadata.get("width", 0),
-                "height": metadata.get("height", 0),
-                "format": metadata.get("format", "unknown"),
-            })
-        
-        return output
-    
+        q_emb = self.encode_text(query_text)
+        return self._cosine_search(q_emb, self.image_embeddings, self.image_metadata, top_k, "image")
+
+    def search_videos(self, query_text: str, top_k: int = 5) -> List[Dict]:
+        if not self.video_embeddings:
+            print("[Multimodal] No videos indexed. Run index_videos() first.")
+            return []
+        q_emb = self.encode_text(query_text)
+        return self._cosine_search(q_emb, self.video_embeddings, self.video_metadata, top_k, "video")
+
+    def search(self, query_text: str, top_k: int = 5) -> List[Dict]:
+        return self.search_images(query_text, top_k=top_k)
+
+    def search_all(self, query_text: str, top_k: int = 5) -> Dict[str, List[Dict]]:
+        return {
+            "images": self.search_images(query_text, top_k=top_k),
+            "videos": self.search_videos(query_text, top_k=top_k),
+        }
+
+    # ──────────────────── stats ────────────────────
+
     def get_stats(self) -> Dict:
-        """Return retriever statistics."""
         return {
+            "model": self.model_name,
+            "device": self.device,
+            "embedding_dim": EMBEDDING_DIM,
             "total_images": len(self.image_embeddings),
-            "using_clip": self.use_clip,
-            "embedding_dim": len(next(iter(self.image_embeddings.values()))) if self.image_embeddings else 0,
+            "total_videos": len(self.video_embeddings),
         }
 
+    # ──────────────────── clear ────────────────────
 
-class CrossModalComparison:
-    """
-    Compare traditional VSM text retrieval with cross-modal retrieval.
-    """
-    
-    def __init__(self, text_retriever, image_retriever):
-        self.text_retriever = text_retriever  # VSM or BM25
-        self.image_retriever = image_retriever  # CLIP-based
-    
-    def compare_retrieval(self, query: str, top_k: int = 5) -> Dict:
-        """
-        Run both retrieval methods and compare results.
-        
-        Returns:
-            Comparison dict with both result sets
-        """
-        from preprocessor import TextPreprocessor
-        
-        preprocessor = TextPreprocessor()
-        tokens = preprocessor.segment(query)
-        
-        # Text retrieval
-        text_results = self.text_retriever.search(tokens, top_k=top_k)
-        
-        # Image retrieval
-        image_results = self.image_retriever.search(query, top_k=top_k)
-        
-        return {
-            "query": query,
-            "text_results": text_results,
-            "image_results": image_results,
-            "text_count": len(text_results),
-            "image_count": len(image_results),
-        }
-    
-    def print_comparison(self, query: str, top_k: int = 5):
-        """Print formatted comparison of retrieval methods."""
-        result = self.compare_retrieval(query, top_k)
-        
-        print(f"\n{'='*70}")
-        print(f"跨模态检索对比: \"{query}\"")
-        print(f"{'='*70}")
-        
-        print("\n[传统文本检索 - VSM/BM25]")
-        for i, r in enumerate(result["text_results"], 1):
-            print(f"  {i}. [{r['score']:.4f}] {r['title'][:50]}")
-        
-        print("\n[跨模态图像检索 - CLIP]")
-        for i, r in enumerate(result["image_results"], 1):
-            print(f"  {i}. [{r['score']:.4f}] {r['image_id']} ({r['width']}x{r['height']})")
-        
-        print(f"\n{'='*70}")
+    def clear_index(self):
+        self.image_embeddings.clear()
+        self.image_metadata.clear()
+        self.video_embeddings.clear()
+        self.video_metadata.clear()
+        for f in [IMAGE_INDEX_FILE, IMAGE_METADATA_FILE, VIDEO_INDEX_FILE, VIDEO_METADATA_FILE]:
+            if os.path.exists(f):
+                os.remove(f)
+        print("[Multimodal] Index cleared.")
 
 
-# Sample images for demonstration
-def create_sample_images():
-    """Create sample images for cross-modal retrieval demo."""
-    os.makedirs(IMAGE_DIR, exist_ok=True)
-    
-    # Create simple colored images representing different concepts
-    sample_specs = [
-        ("ai_chip.jpg", (100, 100, 200), "AI chip technology"),  # Blue = tech
-        ("nature_forest.jpg", (50, 150, 50), "Green forest nature"),  # Green = nature
-        ("city_skyline.jpg", (80, 80, 80), "Urban city skyline"),  # Gray = city
-        ("food_dish.jpg", (200, 100, 50), "Delicious food"),  # Orange = food
-        ("robot_arm.jpg", (150, 150, 200), "Industrial robot"),  # Light blue = tech
-        ("solar_panel.jpg", (50, 100, 150), "Solar energy green"),  # Blue-green = energy
-        ("data_center.jpg", (30, 30, 80), "Data center servers"),  # Dark blue = tech
-        ("electric_car.jpg", (100, 200, 100), "Electric vehicle"),  # Green = eco/tech
-    ]
-    
-    for filename, color, description in sample_specs:
-        filepath = os.path.join(IMAGE_DIR, filename)
-        if not os.path.exists(filepath):
-            # Create simple colored image
-            img = Image.new('RGB', (224, 224), color)
-            img.save(filepath, quality=85)
-            print(f"  Created: {filename} - {description}")
-    
-    print(f"[Multimodal] Sample images ready in {IMAGE_DIR}")
+# backward-compatible alias for main.py
+CLIPImageRetriever = MultimodalRetriever
 
+
+# ──────────────────── demo ────────────────────
 
 if __name__ == "__main__":
-    # Demo
-    print("Cross-Modal Retrieval Demo")
-    print("=" * 50)
-    
-    # Create sample images
-    create_sample_images()
-    
-    # Initialize retriever
-    retriever = CLIPImageRetriever(use_clip=False)  # Use fallback for demo
-    retriever.index_images()
-    
-    # Test queries
+    print("=" * 60)
+    print("  Multimodal Retrieval Demo (Jina CLIP v2)")
+    print("  Text -> Image  |  Text -> Video")
+    print("=" * 60)
+
+    retriever = MultimodalRetriever()
+
+    retriever.index_all()
+
     queries = [
         "人工智能芯片技术",
         "绿色能源环保",
         "城市建筑风景",
         "美食烹饪",
+        "AI chip technology",
+        "sustainable energy nature",
     ]
-    
-    for query in queries:
-        print(f"\nQuery: {query}")
-        results = retriever.search(query, top_k=3)
-        for r in results:
-            print(f"  [{r['score']:.4f}] {r['image_id']}")
+
+    for q in queries:
+        print(f"\n{'─' * 60}")
+        print(f"Query: \"{q}\"")
+
+        img_results = retriever.search_images(q, top_k=3)
+        if img_results:
+            print("  [Images]")
+            for r in img_results:
+                print(f"    {r['score']:.4f}  {r['image_id']}")
+
+        vid_results = retriever.search_videos(q, top_k=3)
+        if vid_results:
+            print("  [Videos]")
+            for r in vid_results:
+                print(f"    {r['score']:.4f}  {r['video_id']}")
+
+    print(f"\n{'=' * 60}")
+    print("Stats:", retriever.get_stats())
