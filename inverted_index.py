@@ -32,12 +32,6 @@ class InvertedIndex:
                 self.index[token][doc_id] += 1
                 token_set.add(token)
             self.doc_lengths[doc_id] = len(doc["tokens"])
-            for token in token_set:
-                if "df" not in doc:
-                    doc["df"] = {}
-                doc["df"] = doc.get("df", {})
-            for token in token_set:
-                pass
 
         for token, postings in self.index.items():
             df = len(postings)

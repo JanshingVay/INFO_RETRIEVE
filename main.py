@@ -10,16 +10,18 @@ from inverted_index import InvertedIndex
 from vsm import VectorSpaceModel
 from bm25 import BM25Model
 from evaluator import RetrievalEvaluator
-from multimodal_retrieval import CLIPImageRetriever, create_sample_images
+from multimodal_retrieval import CLIPImageRetriever
 from visualization import generate_all_visualizations
 from relevance_feedback import FeedbackStore
+
+_multimodal_retriever = None
 
 
 def print_banner():
     print("""
 ╔══════════════════════════════════════════════════════════════════╗
 ║           信息检索系统 - Information Retrieval System              ║
-║   跨模态检索 + BM25优化 + 高并发爬虫 + 可视化评价                      ║
+║   跨模态多媒体检索 + BM25优化 + 高并发爬虫 + 可视化评价                 ║
 ║  Cross-Modal + BM25 + Async Crawler + Visualization              ║
 ╚══════════════════════════════════════════════════════════════════╝
 """)
@@ -33,7 +35,7 @@ def print_menu():
   [3] 搜索文档 - TF-IDF/VSM
   [4] 搜索文档 - BM25 (优化算法)
   [5] 算法对比 (TF-IDF vs BM25)
-  [6] 跨模态图像检索 (CLIP Text-to-Image)
+  [6] 跨模态多媒体检索 (CLIP Text-to-Image/Video)
   [7] 交互式查询 (Interactive Query)
   [8] 人工评价检索结果 (Evaluation)
   [9] 生成可视化图表 (Generate Charts)
@@ -273,35 +275,68 @@ def do_algorithm_comparison(index=None, preprocessor=None):
         print(f"\n  {'─' * 50}")
 
 
+def _get_multimodal_retriever():
+    global _multimodal_retriever
+    if _multimodal_retriever is None:
+        print("[Multimodal] 首次加载 Jina CLIP v2 模型，请稍候...")
+        _multimodal_retriever = CLIPImageRetriever()
+    return _multimodal_retriever
+
+
 def do_multimodal_search(query_str=None):
-    """Cross-modal text-to-image retrieval."""
-    print("\n[ Cross-Modal Text-to-Image Retrieval ]")
-    print("Using CLIP or fallback encoder for semantic image search\n")
+    """Cross-modal text-to-image / text-to-video retrieval (singleton model)."""
+    print("\n[ Cross-Modal Multimedia Retrieval - Jina CLIP v2 ]")
+    print("Text -> Image  |  Text -> Video (90+ languages)\n")
 
-    create_sample_images()
+    retriever = _get_multimodal_retriever()
 
-    retriever = CLIPImageRetriever(use_clip=True)
-    retriever.index_images()
+    print("  索引模式: [1] 仅图片  [2] 仅视频  [3] 全部")
+    mode = input("  请选择 (默认3): ").strip() or "3"
+
+    if mode == "1":
+        retriever.index_images()
+    elif mode == "2":
+        retriever.index_videos()
+    else:
+        retriever.index_all()
+
+    stats = retriever.get_stats()
+    print(f"  已索引: {stats['total_images']} 图片, {stats['total_videos']} 视频")
 
     if query_str is None:
-        query_str = input("请输入图像检索查询（如：人工智能芯片、绿色能源）: ").strip()
+        query_str = input("请输入多模态查询（如：人工智能芯片、绿色能源）: ").strip()
 
     if not query_str:
         return
 
     print(f"\n查询: \"{query_str}\"")
-    results = retriever.search(query_str, top_k=5)
 
-    if not results:
-        print("  未找到相关图像。")
-        return
+    if stats['total_images'] > 0:
+        img_results = retriever.search_images(query_str, top_k=5)
+        if img_results:
+            print(f"\n  {'─' * 60}")
+            print(f"  [图片结果] 共 {len(img_results)} 个:")
+            print(f"  {'─' * 60}")
+            for i, r in enumerate(img_results):
+                print(f"  [{i + 1}] 相关性: {r['score']:.4f}")
+                print(f"      文件: {r['image_id']}")
+                print(f"      尺寸: {r.get('width', 0)}x{r.get('height', 0)}")
+                print(f"      路径: file:///{r['path'].replace(chr(92), '/')}")
 
-    print(f"\n  找到 {len(results)} 个相关图像:\n")
-    for i, r in enumerate(results):
-        print(f"  [{i + 1}] 相似度: {r['score']:.4f}")
-        print(f"      图像: {r['image_id']}")
-        print(f"      尺寸: {r['width']}x{r['height']}")
-        print(f"      路径: {r['path']}")
+    if stats['total_videos'] > 0:
+        vid_results = retriever.search_videos(query_str, top_k=5)
+        if vid_results:
+            print(f"\n  {'─' * 60}")
+            print(f"  [视频结果] 共 {len(vid_results)} 个:")
+            print(f"  {'─' * 60}")
+            for i, r in enumerate(vid_results):
+                print(f"  [{i + 1}] 相关性: {r['score']:.4f}")
+                print(f"      文件: {r['video_id']}")
+                print(f"      大小: {r.get('size_mb', 0)} MB")
+                print(f"      路径: file:///{r['path'].replace(chr(92), '/')}")
+
+    if stats['total_images'] == 0 and stats['total_videos'] == 0:
+        print("  未找到任何结果。请放入图片/视频到 data/images/ 或 data/videos/ 目录。")
 
 
 def interactive_query(index=None, preprocessor=None, feedback_store=None):
@@ -467,9 +502,9 @@ def show_status():
     print(f"\n  支持算法:")
     print(f"    ✓ TF-IDF (VSM)")
     print(f"    ✓ BM25 (优化)")
-    print(f"    ✓ 跨模态检索 (CLIP)")
-    print(f"    ✓ 相关反馈 (Rocchio)")
-
+    print(f"    ✓ 跨模态多媒体检索 (Jina CLIP v2)")
+    
+    # Performance
     print(f"\n  性能特性:")
     print(f"    ✓ 异步并发爬虫 (asyncio + aiohttp)")
     print(f"    ✓ 10个数据源配置 (IT之家/36氪/新华网/人民网/凤凰...)")
