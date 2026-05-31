@@ -14,6 +14,8 @@ from multimodal_retrieval import CLIPImageRetriever
 from visualization import generate_all_visualizations
 from relevance_feedback import FeedbackStore
 
+_multimodal_retriever = None
+
 
 def print_banner():
     print("""
@@ -273,12 +275,20 @@ def do_algorithm_comparison(index=None, preprocessor=None):
         print(f"\n  {'─' * 50}")
 
 
+def _get_multimodal_retriever():
+    global _multimodal_retriever
+    if _multimodal_retriever is None:
+        print("[Multimodal] 首次加载 Jina CLIP v2 模型，请稍候...")
+        _multimodal_retriever = CLIPImageRetriever()
+    return _multimodal_retriever
+
+
 def do_multimodal_search(query_str=None):
-    """Cross-modal text-to-image / text-to-video retrieval."""
+    """Cross-modal text-to-image / text-to-video retrieval (singleton model)."""
     print("\n[ Cross-Modal Multimedia Retrieval - Jina CLIP v2 ]")
     print("Text -> Image  |  Text -> Video (90+ languages)\n")
 
-    retriever = CLIPImageRetriever()
+    retriever = _get_multimodal_retriever()
 
     print("  索引模式: [1] 仅图片  [2] 仅视频  [3] 全部")
     mode = input("  请选择 (默认3): ").strip() or "3"
@@ -304,16 +314,26 @@ def do_multimodal_search(query_str=None):
     if stats['total_images'] > 0:
         img_results = retriever.search_images(query_str, top_k=5)
         if img_results:
-            print(f"\n  [图片结果] 共 {len(img_results)} 个:")
+            print(f"\n  {'─' * 60}")
+            print(f"  [图片结果] 共 {len(img_results)} 个:")
+            print(f"  {'─' * 60}")
             for i, r in enumerate(img_results):
-                print(f"    [{i + 1}] {r['score']:.4f}  {r['image_id']}  ({r.get('width',0)}x{r.get('height',0)})")
+                print(f"  [{i + 1}] 相关性: {r['score']:.4f}")
+                print(f"      文件: {r['image_id']}")
+                print(f"      尺寸: {r.get('width', 0)}x{r.get('height', 0)}")
+                print(f"      路径: file:///{r['path'].replace(chr(92), '/')}")
 
     if stats['total_videos'] > 0:
         vid_results = retriever.search_videos(query_str, top_k=5)
         if vid_results:
-            print(f"\n  [视频结果] 共 {len(vid_results)} 个:")
+            print(f"\n  {'─' * 60}")
+            print(f"  [视频结果] 共 {len(vid_results)} 个:")
+            print(f"  {'─' * 60}")
             for i, r in enumerate(vid_results):
-                print(f"    [{i + 1}] {r['score']:.4f}  {r['video_id']}  ({r.get('size_mb',0)} MB)")
+                print(f"  [{i + 1}] 相关性: {r['score']:.4f}")
+                print(f"      文件: {r['video_id']}")
+                print(f"      大小: {r.get('size_mb', 0)} MB")
+                print(f"      路径: file:///{r['path'].replace(chr(92), '/')}")
 
     if stats['total_images'] == 0 and stats['total_videos'] == 0:
         print("  未找到任何结果。请放入图片/视频到 data/images/ 或 data/videos/ 目录。")
