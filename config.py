@@ -5,10 +5,10 @@ DOCUMENTS_FILE = os.path.join(DATA_DIR, "documents.json")
 INDEX_FILE = os.path.join(DATA_DIR, "inverted_index.json")
 STOPWORDS_FILE = os.path.join(DATA_DIR, "stopwords.txt")
 
-CRAWL_MIN_DOCS = 500
+CRAWL_MIN_DOCS = 700
 CRAWL_TIMEOUT = 15
 CRAWL_DELAY = 0.3
-CRAWL_MAX_DOCS = 700
+CRAWL_MAX_DOCS = 800
 
 VSM_TOP_K = 20
 

@@ -27,3 +27,7 @@ opencv-python>=4.8.0
 # sentence-transformers==3.3.0
 transformers>=4.41.0,<5.0.0
 sentence-transformers==3.3.0
+
+# 图形界面
+streamlit>=1.35.0
+pandas>=2.0.0
