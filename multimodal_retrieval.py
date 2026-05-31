@@ -36,6 +36,7 @@ except Exception:
 import os
 import json
 import pickle
+import pickle
 import numpy as np
 from PIL import Image
 from typing import List, Dict, Tuple, Optional
@@ -360,6 +361,7 @@ class MultimodalRetriever:
             results.append((item_id, sim))
 
         results.sort(key=lambda x: x[1], reverse=True)
+
 
         output = []
         for item_id, score in results[:top_k]:

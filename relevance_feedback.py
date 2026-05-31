@@ -204,17 +204,7 @@ class FeedbackStore:
     def expand_query_tokens(self, query_tokens, index, top_k=5):
         """
         Rocchio-inspired query expansion using feedback.
-
-        Finds terms from liked documents that are NOT in the original query,
-        ranked by tf-idf and feedback confidence.
-
-        Args:
-            query_tokens: Original query token list
-            index: InvertedIndex instance
-            top_k: Number of expansion terms
-
-        Returns:
-            List of (token, weight) expansion terms
+        Only expands from liked documents that overlap with the current query.
         """
         liked_docs = self.get_liked_docs()
         if not liked_docs:
@@ -224,13 +214,19 @@ class FeedbackStore:
         term_scores = defaultdict(float)
 
         for doc_id in liked_docs:
-            boost = self.get_document_boost(doc_id)
-            if boost <= 0:
-                continue
             doc = index.documents[doc_id] if isinstance(index.documents, list) else index.documents.get(str(doc_id))
             if not doc:
                 continue
             doc_tokens = doc.get("tokens", [])
+            doc_token_set = set(doc_tokens)
+
+            if not (query_set & doc_token_set):
+                continue
+
+            boost = self.get_document_boost(doc_id)
+            if boost <= 0:
+                continue
+
             token_tf = Counter(doc_tokens)
             seen_in_doc = set()
             for token, tf in token_tf.items():
@@ -247,6 +243,40 @@ class FeedbackStore:
         max_score = sorted_terms[0][1]
         normalized = [(t, s / max_score * 0.3) for t, s in sorted_terms[:top_k]]
         return normalized
+
+    def get_suppressed_terms(self, query_tokens, index, gamma=0.3):
+        """
+        Rocchio gamma term: find terms from disliked documents to suppress.
+        Only considers disliked docs that overlap with current query.
+        """
+        disliked_docs = self.get_disliked_docs()
+        if not disliked_docs:
+            return set()
+
+        query_set = set(query_tokens)
+        term_scores = defaultdict(float)
+
+        for doc_id in disliked_docs:
+            doc = index.documents[doc_id] if isinstance(index.documents, list) else index.documents.get(str(doc_id))
+            if not doc:
+                continue
+            doc_tokens = doc.get("tokens", [])
+            if not (query_set & set(doc_tokens)):
+                continue
+
+            penalty = abs(self.get_document_boost(doc_id, boost_strength=1.0))
+            if penalty <= 0:
+                continue
+
+            token_tf = Counter(doc_tokens)
+            for token, tf in token_tf.items():
+                if token in query_set:
+                    continue
+                idf = index.get_idf(token)
+                term_scores[token] += tf * idf * penalty
+
+        sorted_terms = sorted(term_scores.items(), key=lambda x: x[1], reverse=True)
+        return {t for t, _ in sorted_terms[:5]}
 
     def get_feedback_stats(self):
         """Return summary statistics of feedback data."""

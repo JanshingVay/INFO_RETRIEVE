@@ -161,19 +161,20 @@ class BM25Model:
         return output
     
     def search_with_feedback(self, query_tokens, feedback_store, top_k=None,
-                              query_expansion=True, boost_strength=None):
+                              query_expansion=True, boost_strength=1.0):
         """
-        Search with relevance feedback optimization.
+        Search with full Rocchio relevance feedback.
 
-        Two mechanisms:
+        Three mechanisms:
         1. Query expansion — add high-IDF terms from liked documents
-        2. Document boosting — boost score of well-rated documents
+        2. Document boosting — boost liked / penalize disliked docs
+        3. Negative term suppression — down-weight terms common in disliked docs
         """
         if top_k is None:
             top_k = VSM_TOP_K
 
         expanded_tokens = list(query_tokens)
-        expansion_terms = []
+        suppressed_terms = set()
 
         if query_expansion:
             expansion_terms = feedback_store.expand_query_tokens(
@@ -181,8 +182,11 @@ class BM25Model:
             )
             if expansion_terms:
                 for term, weight in expansion_terms:
-                    for _ in range(max(1, int(weight * 10))):
-                        expanded_tokens.append(term)
+                    expanded_tokens.extend([term] * max(1, int(weight * 10)))
+
+            suppressed_terms = feedback_store.get_suppressed_terms(
+                query_tokens, self.index, gamma=0.3
+            )
 
         if not expanded_tokens:
             return []
@@ -195,6 +199,10 @@ class BM25Model:
         results = []
         for doc_id in candidate_docs:
             score = self._score_document(doc_id, expanded_tokens)
+            for term in suppressed_terms:
+                tf = self.index.get_postings(term).get(doc_id, 0)
+                if tf > 0:
+                    score -= self.index.get_idf(term) * tf * 0.3
 
             fb_boost = feedback_store.get_document_boost(
                 doc_id,

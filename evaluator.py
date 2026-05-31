@@ -130,15 +130,22 @@ class RetrievalEvaluator:
         return ratings
 
     def interactive_evaluation(self):
-        """Interactive evaluation with feedback loop and before/after comparison."""
+        """Systematic evaluation: preset queries + metrics (Precision@10, Recall).
+        
+        Differs from interactive mode (option 7):
+        - 10 preset queries covering diverse domains (AI, 5G, EV, chips, etc.)
+        - Uses PURE search (no historical feedback contamination)
+        - Reports Precision@10 and Recall per query
+        - Saves evaluation data for report generation
+        """
         print("\n" + "=" * 70)
-        print("  检索结果人工评价系统 (带反馈闭环)")
+        print("  检索结果人工评价系统")
+        print("  10个预设查询 · 纯净检索 · 自动计算Precision/Recall")
         print("=" * 70)
 
         fb_stats = self.feedback.get_feedback_stats()
-        print(f"已有反馈数据: {fb_stats['total_ratings']} 条评分, "
-              f"{fb_stats['rated_docs']} 篇文档, "
-              f"{fb_stats['liked_docs']} 篇收藏")
+        if fb_stats['total_ratings'] > 0:
+            print(f"(已有反馈数据: {fb_stats['total_ratings']} 条，评价格式与交互模式共享)")
 
         # Show preset queries
         print(f"\n当前评测查询 ({len(self.eval_queries)} 个):")
@@ -162,92 +169,62 @@ class RetrievalEvaluator:
             self._evaluate_preset_queries()
 
     def _evaluate_preset_queries(self):
-        """Evaluate all preset queries with feedback."""
-        total_before_p = 0
-        total_after_p = 0
-        valid = 0
-
+        """Evaluate all preset queries WITHOUT prior feedback bias."""
+        print("\n  [评价模式] 使用纯净搜索结果（不受历史反馈影响）")
         for i, eq in enumerate(self.eval_queries):
             print(f"\n{'─' * 70}")
             print(f"查询 {i + 1}/{len(self.eval_queries)}: {eq['query']}")
             print(f"描述: {eq['description']}")
             print(f"{'─' * 70}")
 
-            # Run search WITHOUT feedback
-            results_before = self.run_search(eq["query"], top_k=10)
-            if not results_before:
+            results = self.run_search(eq["query"], top_k=10)
+            if not results:
                 print("  无检索结果。")
                 continue
 
-            # Run search WITH feedback
-            results_after = self.run_search_with_feedback(eq["query"], top_k=10)
-
-            # Show results (feedback-optimized)
-            ratings = self._rate_results_interactive(results_after, eq["query"])
+            ratings = self._rate_results_interactive(results, eq["query"])
             if ratings is None:
                 break
             if not ratings:
                 continue
 
-            # Save feedback
             self.feedback.record_batch(ratings, eq["query"])
-
-            # Update preset query with relevant doc IDs
             relevant = [doc_id for doc_id, r in ratings.items() if r >= 4]
             eq["relevant_docs"] = relevant
             self._save_eval_queries()
 
-            # Compute before/after precision
             relevant_set = set(relevant)
-            before_hits = len(relevant_set & set(r["id"] for r in results_before))
-            after_hits = len(relevant_set & set(r["id"] for r in results_after))
-            p_before = before_hits / len(results_before) if results_before else 0
-            p_after = after_hits / len(results_after) if results_after else 0
-
-            total_before_p += p_before
-            total_after_p += p_after
-            valid += 1
-
-            print(f"\n  本次评价: 标记了 {len(ratings)} 个评分 ({len(relevant)} 个相关)")
-            if p_before != p_after:
-                delta = p_after - p_before
-                direction = "↑" if delta > 0 else "↓"
-                print(f"  反馈效果: Precision {p_before:.2%} → {p_after:.2%} ({direction}{abs(delta):.1%})")
-            print(f"  累计反馈: {self.feedback.get_feedback_stats()['total_ratings']} 条评分")
-
-        if valid > 0:
-            print(f"\n{'─' * 50}")
-            print(f"评测完成！共评价 {valid} 个查询")
-            print(f"反馈优化前 平均 Precision@10: {total_before_p / valid:.2%}")
-            print(f"反馈优化后 平均 Precision@10: {total_after_p / valid:.2%}")
-            if total_before_p > 0:
-                improvement = (total_after_p - total_before_p) / total_before_p * 100
-                print(f"相对提升: {improvement:+.1f}%")
+            retrieved = set(r["id"] for r in results)
+            hits = relevant_set & retrieved
+            p = len(hits) / len(retrieved) if retrieved else 0
+            r = len(hits) / len(relevant_set) if relevant_set else 0
+            print(f"\n  标记了 {len(ratings)} 个评分 ({len(relevant)} 个相关)")
+            print(f"  Precision@10: {p:.2%}  Recall: {r:.2%}")
 
     def _evaluate_custom_query(self, query_str):
-        """Evaluate a single custom query with feedback."""
+        """Evaluate a single custom query WITHOUT prior feedback bias."""
         print(f"\n{'─' * 70}")
         print(f"自定义查询: \"{query_str}\"")
 
-        results_before = self.run_search(query_str, top_k=10)
-        results_after = self.run_search_with_feedback(query_str, top_k=10)
+        results = self.run_search(query_str, top_k=10)
+        if not results:
+            print("  无检索结果。")
+            return
 
-        ratings = self._rate_results_interactive(results_after, query_str)
+        ratings = self._rate_results_interactive(results, query_str)
         if ratings is None or not ratings:
             return
 
         self.feedback.record_batch(ratings, query_str)
 
         relevant = [doc_id for doc_id, r in ratings.items() if r >= 4]
-
         relevant_set = set(relevant)
-        before_hits = len(relevant_set & set(r["id"] for r in results_before))
-        after_hits = len(relevant_set & set(r["id"] for r in results_after))
-        p_before = before_hits / len(results_before) if results_before else 0
-        p_after = after_hits / len(results_after) if results_after else 0
-
-        print(f"\n反馈优化前 Precision@10: {p_before:.2%}")
-        print(f"反馈优化后 Precision@10: {p_after:.2%}")
+        retrieved = set(r["id"] for r in results)
+        hits = relevant_set & retrieved
+        p = len(hits) / len(retrieved) if retrieved else 0
+        r = len(hits) / len(relevant_set) if relevant_set else 0
+        print(f"\n  标记了 {len(ratings)} 个评分 ({len(relevant)} 个相关)")
+        print(f"  Precision@10: {p:.2%}  Recall: {r:.2%}")
 
         self.eval_queries.append({
             "query": query_str,
