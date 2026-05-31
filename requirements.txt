@@ -22,6 +22,8 @@ scikit-learn
 opencv-python>=4.8.0
 
 # 🚀 激进且优雅的 5.x 全新大版本多模态底座
-tokenizers>=0.23.1
-transformers==5.9.0
+# tokenizers>=0.23.1
+# transformers==5.9.0
+# sentence-transformers==3.3.0
+transformers>=4.41.0,<5.0.0
 sentence-transformers==3.3.0
