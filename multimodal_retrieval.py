@@ -1,6 +1,6 @@
 """
 Cross-Modal Multimedia Retrieval Module
-Text-to-Image + Text-to-Video Retrieval using Jina CLIP v2 + sentence-transformers.
+Text-to-Image + Text-to-Video Retrieval using Jina CLIP v2.
 
 Capabilities:
 1. Text-to-Image: natural language query -> relevant images
@@ -8,43 +8,30 @@ Capabilities:
 3. Unified semantic space via Jina CLIP v2 (1024-dim, 90+ languages)
 
 Architecture:
-- sentence-transformers: high-level text encoding API
-- Jina CLIP v2 (transformers): image/video frame encoding via get_image_features()
+- Jina CLIP v2 via transformers.AutoModel (get_text_features / get_image_features)
 - OpenCV: video frame extraction
+- No sentence-transformers dependency needed at runtime
 """
 
-# ========== Transformers 5.x clip_loss 兼容补丁 ==========
-try:
-    import torch
-    import transformers.models.clip.modeling_clip as hf_clip_mod
+# ========== Transformers 5.x clip_loss 兼容补丁（必须在 import 模型前执行）==========
+import torch
+import torch.nn.functional as F
+import transformers.models.clip.modeling_clip as _hf_clip_mod
 
-    # 如果模块里没有 clip_loss，手动挂载官方原版实现
-    if not hasattr(hf_clip_mod, "clip_loss"):
-        def clip_loss(similarity: torch.Tensor) -> torch.Tensor:
-            import torch.nn.functional as F
-            caption_loss = F.cross_entropy(similarity, torch.arange(similarity.size(0), device=similarity.device))
-            image_loss = F.cross_entropy(similarity.T, torch.arange(similarity.size(0), device=similarity.device))
-            return (caption_loss + image_loss) / 2.0
-
-        # 强行挂载，让外部导入能找到
-        hf_clip_mod.clip_loss = clip_loss
-
-except Exception:
-    # 静默失败，不影响主程序
-    pass
+if not hasattr(_hf_clip_mod, "clip_loss"):
+    def _clip_loss(similarity):
+        n = similarity.size(0)
+        return (F.cross_entropy(similarity, torch.arange(n, device=similarity.device))
+                + F.cross_entropy(similarity.T, torch.arange(n, device=similarity.device))) / 2.0
+    _hf_clip_mod.clip_loss = _clip_loss
 
 import os
 import json
 import pickle
-import pickle
 import numpy as np
 from PIL import Image
 from typing import List, Dict, Tuple, Optional
-import warnings
 
-import torch
-
-from sentence_transformers import SentenceTransformer
 from config import DATA_DIR
 
 IMAGE_DIR = os.path.join(DATA_DIR, "images")
@@ -115,9 +102,8 @@ class MultimodalRetriever:
         self.video_embeddings: Dict[str, np.ndarray] = {}
         self.video_metadata: Dict[str, dict] = {}
 
-        self.model = None
-        self._clip_model = None
-        self._clip_processor = None
+        self._model = None
+        self._processor = None
 
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -133,31 +119,15 @@ class MultimodalRetriever:
     # ──────────────────── model loading ────────────────────
 
     def _load_model(self):
-        print(f"[Multimodal] Loading Jina CLIP v2 via sentence-transformers...")
+        print(f"[Multimodal] Loading Jina CLIP v2 via transformers...")
         print(f"[Multimodal] Device: {self.device}")
         try:
-            self.model = SentenceTransformer(
-                self.model_name,
-                trust_remote_code=True,
-                device=self.device,
-            )
-            self._clip_model = self.model._first_module().auto_model
-            self._clip_processor = self.model._first_module().processor
-            print("[Multimodal] Model loaded successfully. Embedding dim = 1024, 90+ languages.")
-        except Exception as e:
-            print(f"[Multimodal] Failed via sentence-transformers: {e}")
-            self._load_model_fallback()
-
-    def _load_model_fallback(self):
-        print("[Multimodal] Falling back to transformers AutoModel...")
-        try:
             from transformers import AutoModel, AutoProcessor
-            self.model = None
-            self._clip_model = AutoModel.from_pretrained(self.model_name, trust_remote_code=True)
-            self._clip_model.to(self.device)
-            self._clip_model.eval()
-            self._clip_processor = AutoProcessor.from_pretrained(self.model_name, trust_remote_code=True)
-            print("[Multimodal] Model loaded via transformers fallback.")
+            self._model = AutoModel.from_pretrained(self.model_name, trust_remote_code=True)
+            self._model.to(self.device)
+            self._model.eval()
+            self._processor = AutoProcessor.from_pretrained(self.model_name, trust_remote_code=True)
+            print("[Multimodal] Jina CLIP v2 loaded. Dim=1024, 90+ languages.")
         except Exception as e:
             print(f"[Multimodal] FATAL: cannot load model: {e}")
             raise e
@@ -166,26 +136,15 @@ class MultimodalRetriever:
 
     def encode_text(self, text: str) -> np.ndarray:
         try:
-            if self.model is not None:
-                emb = self.model.encode(
-                    [text],
-                    normalize_embeddings=True,
-                    show_progress_bar=False,
-                )
-                return emb[0].astype(np.float32)
-
-            return self._encode_text_clip(text)
+            inputs = self._processor(text=[text], return_tensors="pt", padding=True, truncation=True)
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            with torch.no_grad():
+                features = self._model.get_text_features(**inputs)
+            features = features / features.norm(p=2, dim=-1, keepdim=True)
+            return features.float().cpu().numpy().flatten().astype(np.float32)
         except Exception as e:
             print(f"[Multimodal] Text encoding error: {e}")
             return np.zeros(EMBEDDING_DIM, dtype=np.float32)
-
-    def _encode_text_clip(self, text: str) -> np.ndarray:
-        inputs = self._clip_processor(text=[text], return_tensors="pt", padding=True, truncation=True)
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        with torch.no_grad():
-            features = self._clip_model.get_text_features(**inputs)
-        features = features / features.norm(p=2, dim=-1, keepdim=True)
-        return features.cpu().numpy().flatten().astype(np.float32)
 
     # ──────────────────── image encoding ────────────────────
 
@@ -199,12 +158,12 @@ class MultimodalRetriever:
 
     def encode_image_pil(self, image: Image.Image) -> np.ndarray:
         try:
-            inputs = self._clip_processor(images=image, return_tensors="pt")
+            inputs = self._processor(images=image, return_tensors="pt")
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             with torch.no_grad():
-                features = self._clip_model.get_image_features(**inputs)
+                features = self._model.get_image_features(**inputs)
             features = features / features.norm(p=2, dim=-1, keepdim=True)
-            return features.cpu().numpy().flatten().astype(np.float32)
+            return features.float().cpu().numpy().flatten().astype(np.float32)
         except Exception as e:
             print(f"[Multimodal] PIL image encoding error: {e}")
             return np.zeros(EMBEDDING_DIM, dtype=np.float32)

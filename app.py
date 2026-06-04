@@ -103,14 +103,36 @@ def load_eval_queries(eval_stamp):
     return data if isinstance(data, list) else []
 
 
+def _ensure_media_indexed():
+    if Path(IMAGE_METADATA_FILE).exists() and Path(VIDEO_METADATA_FILE).exists():
+        return
+
+    try:
+        r = load_multimodal_retriever()
+        need_images = not Path(IMAGE_METADATA_FILE).exists() or not Path(IMAGE_INDEX_FILE).exists()
+        need_videos = not Path(VIDEO_METADATA_FILE).exists() or not Path(VIDEO_INDEX_FILE).exists()
+
+        if need_images:
+            r.index_images()
+        if need_videos:
+            r.index_videos()
+
+        if need_images or need_videos:
+            st.cache_data.clear()
+    except Exception:
+        pass
+
+
 @st.cache_data(show_spinner=False)
 def load_video_metadata(video_stamp):
+    _ensure_media_indexed()
     data = read_json(VIDEO_METADATA_FILE, {})
     return data if isinstance(data, dict) else {}
 
 
 @st.cache_data(show_spinner=False)
 def load_image_metadata(image_stamp):
+    _ensure_media_indexed()
     data = read_json(IMAGE_METADATA_FILE, {})
     return data if isinstance(data, dict) else {}
 
