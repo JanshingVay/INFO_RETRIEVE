@@ -290,8 +290,14 @@ def do_multimodal_search(query_str=None):
 
     retriever = _get_multimodal_retriever()
 
-    print("  索引模式: [1] 仅图片  [2] 仅视频  [3] 全部")
+    print("  索引/检索模式: [1] 仅图片  [2] 仅视频  [3] 全部")
     mode = input("  请选择 (默认3): ").strip() or "3"
+    if mode not in {"1", "2", "3"}:
+        print("  未识别的选项，已使用默认模式：全部")
+        mode = "3"
+
+    search_images = mode in {"1", "3"}
+    search_videos = mode in {"2", "3"}
 
     if mode == "1":
         retriever.index_images()
@@ -301,7 +307,9 @@ def do_multimodal_search(query_str=None):
         retriever.index_all()
 
     stats = retriever.get_stats()
-    print(f"  已索引: {stats['total_images']} 图片, {stats['total_videos']} 视频")
+    scope = "图片" if mode == "1" else ("视频" if mode == "2" else "图片+视频")
+    print(f"  当前索引库: {stats['total_images']} 图片, {stats['total_videos']} 视频")
+    print(f"  本次检索范围: {scope}")
 
     if query_str is None:
         query_str = input("请输入多模态查询（如：人工智能芯片、绿色能源）: ").strip()
@@ -311,9 +319,12 @@ def do_multimodal_search(query_str=None):
 
     print(f"\n查询: \"{query_str}\"")
 
-    if stats['total_images'] > 0:
+    found_any = False
+
+    if search_images and stats['total_images'] > 0:
         img_results = retriever.search_images(query_str, top_k=5)
         if img_results:
+            found_any = True
             print(f"\n  {'─' * 60}")
             print(f"  [图片结果] 共 {len(img_results)} 个:")
             print(f"  {'─' * 60}")
@@ -323,9 +334,10 @@ def do_multimodal_search(query_str=None):
                 print(f"      尺寸: {r.get('width', 0)}x{r.get('height', 0)}")
                 print(f"      路径: file:///{r['path'].replace(chr(92), '/')}")
 
-    if stats['total_videos'] > 0:
+    if search_videos and stats['total_videos'] > 0:
         vid_results = retriever.search_videos(query_str, top_k=5)
         if vid_results:
+            found_any = True
             print(f"\n  {'─' * 60}")
             print(f"  [视频结果] 共 {len(vid_results)} 个:")
             print(f"  {'─' * 60}")
@@ -335,8 +347,13 @@ def do_multimodal_search(query_str=None):
                 print(f"      大小: {r.get('size_mb', 0)} MB")
                 print(f"      路径: file:///{r['path'].replace(chr(92), '/')}")
 
-    if stats['total_images'] == 0 and stats['total_videos'] == 0:
-        print("  未找到任何结果。请放入图片/视频到 data/images/ 或 data/videos/ 目录。")
+    if not found_any:
+        if search_images and not search_videos:
+            print("  未找到图片结果。请确认 data/images/ 中已有图片并完成图片索引。")
+        elif search_videos and not search_images:
+            print("  未找到视频结果。请确认 data/videos/ 中已有视频并完成视频索引。")
+        else:
+            print("  未找到任何结果。请放入图片/视频到 data/images/ 或 data/videos/ 目录。")
 
 
 def interactive_query(index=None, preprocessor=None, feedback_store=None):

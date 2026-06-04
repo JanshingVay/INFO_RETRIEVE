@@ -154,6 +154,7 @@ class MultimodalRetriever:
             from transformers import AutoModel, AutoProcessor
             self.model = None
             self._clip_model = AutoModel.from_pretrained(self.model_name, trust_remote_code=True)
+            self._clip_model.to(self.device)
             self._clip_model.eval()
             self._clip_processor = AutoProcessor.from_pretrained(self.model_name, trust_remote_code=True)
             print("[Multimodal] Model loaded via transformers fallback.")
