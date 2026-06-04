@@ -35,7 +35,7 @@ class InvertedIndex:
 
         for token, postings in self.index.items():
             df = len(postings)
-            self.idf[token] = math.log10(self.doc_count / (df + 1)) + 1.0
+            self.idf[token] = math.log10((self.doc_count + 1) / (df + 1)) + 1.0
 
         return self
 
