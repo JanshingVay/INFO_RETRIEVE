@@ -4,8 +4,7 @@ venv
 # Data directory - auto-generated at runtime
 /data/*
 !/data/.gitkeep
-!/data/images
-!/data/videos
+
 # IDE
 .vscode/
 .idea/

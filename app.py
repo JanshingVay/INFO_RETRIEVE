@@ -22,6 +22,8 @@ VIDEO_METADATA_FILE = DATA_PATH / "video_metadata.json"
 VIDEO_INDEX_FILE = DATA_PATH / "video_index.pkl"
 IMAGE_METADATA_FILE = DATA_PATH / "image_metadata.json"
 IMAGE_INDEX_FILE = DATA_PATH / "image_index.pkl"
+IMAGE_DIR = DATA_PATH / "images"
+VIDEO_DIR = DATA_PATH / "videos"
 
 
 st.set_page_config(
@@ -131,6 +133,16 @@ def format_size(num_bytes: int) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024
     return f"{value:.1f} TB"
+
+
+def list_media_files(directory: Path, extensions):
+    if not directory.exists():
+        return []
+    return [
+        path
+        for path in sorted(directory.iterdir())
+        if path.is_file() and path.suffix.lower() in extensions
+    ]
 
 
 def render_result(item, rank):
@@ -298,10 +310,39 @@ def page_multimedia():
     st.header("多媒体检索")
     video_meta = load_video_metadata(file_stamp(VIDEO_METADATA_FILE))
     image_meta = load_image_metadata(file_stamp(IMAGE_METADATA_FILE))
+    image_files = list_media_files(IMAGE_DIR, {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"})
+    video_files = list_media_files(VIDEO_DIR, {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"})
+    image_index_ready = IMAGE_INDEX_FILE.exists() and bool(image_meta)
+    video_index_ready = VIDEO_INDEX_FILE.exists() and bool(video_meta)
 
     c1, c2 = st.columns(2)
-    c1.metric("已索引视频", len(video_meta))
-    c2.metric("已索引图片", len(image_meta))
+    c1.metric("已索引视频", len(video_meta), delta=f"素材 {len(video_files)}")
+    c2.metric("已索引图片", len(image_meta), delta=f"素材 {len(image_files)}")
+
+    missing_image_index = bool(image_files) and not image_index_ready
+    missing_video_index = bool(video_files) and not video_index_ready
+    if missing_image_index or missing_video_index:
+        missing_parts = []
+        if missing_image_index:
+            missing_parts.append(f"{len(image_files)} 张图片")
+        if missing_video_index:
+            missing_parts.append(f"{len(video_files)} 个视频")
+        st.warning("检测到 " + "、".join(missing_parts) + " 尚未构建多媒体向量索引。")
+        if st.button("一键构建缺失索引", type="primary", use_container_width=True):
+            try:
+                with st.spinner("正在加载 Jina CLIP v2 并构建索引，首次运行可能需要一些时间..."):
+                    retriever = load_multimodal_retriever()
+                    if missing_image_index:
+                        retriever.index_images(str(IMAGE_DIR))
+                    if missing_video_index:
+                        retriever.index_videos(str(VIDEO_DIR))
+                st.cache_data.clear()
+                st.cache_resource.clear()
+                st.success("多媒体索引构建完成，页面即将刷新。")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"多媒体索引构建失败：{exc}")
+                return
 
     query = st.text_input("输入多媒体语义查询", value="猫")
     top_k = st.slider("返回数量", 1, 5, 3, key="media_top_k")
@@ -313,8 +354,8 @@ def page_multimedia():
         search_videos = st.button("检索视频", use_container_width=True)
 
     if search_images:
-        if not image_meta:
-            st.warning("没有可用的图片元数据。请先在命令行菜单 [6] 中索引图片。")
+        if not image_index_ready:
+            st.warning("没有可用的图片索引。请先点击上方“一键构建缺失索引”。")
             return
         try:
             retriever = load_multimodal_retriever()
@@ -338,8 +379,8 @@ def page_multimedia():
                 st.caption(path or "图片路径缺失")
 
     if search_videos:
-        if not video_meta:
-            st.warning("没有可用的视频元数据。请先在命令行菜单 [6] 中索引视频。")
+        if not video_index_ready:
+            st.warning("没有可用的视频索引。请先点击上方“一键构建缺失索引”。")
             return
         try:
             retriever = load_multimodal_retriever()
