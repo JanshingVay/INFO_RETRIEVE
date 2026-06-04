@@ -10,6 +10,7 @@ from bm25 import BM25Model
 from config import DATA_DIR, DOCUMENTS_FILE, EVAL_QUERIES_FILE, INDEX_FILE
 from inverted_index import InvertedIndex
 from preprocessor import TextPreprocessor
+from relevance_feedback import FeedbackStore
 from vsm import VectorSpaceModel
 
 
@@ -138,10 +139,11 @@ def render_result(item, rank):
     date = item.get("date", "")
     url = item.get("url", "")
     snippet = item.get("snippet", "")
+    feedback_label = " · 反馈优选" if item.get("feedback_boosted") else ""
     st.markdown(
         f"""
         <div class="result-box">
-            <div class="muted">#{rank} · <span class="score">相关度 {score:.6f}</span> · {date or "日期缺失"}</div>
+            <div class="muted">#{rank} · <span class="score">相关度 {score:.6f}</span>{feedback_label} · {date or "日期缺失"}</div>
             <h4 style="margin: 0.35rem 0 0.25rem 0;">{title}</h4>
             <div style="line-height: 1.65;">{snippet}</div>
             <div class="muted" style="margin-top: 0.45rem;">{url}</div>
@@ -149,6 +151,35 @@ def render_result(item, rank):
         """,
         unsafe_allow_html=True,
     )
+
+
+def save_eval_query_record(query: str, relevant_docs):
+    path = Path(EVAL_QUERIES_FILE)
+    queries = read_json(path, [])
+    if not isinstance(queries, list):
+        queries = []
+
+    relevant_set = {int(doc_id) for doc_id in relevant_docs}
+    found = False
+    for item in queries:
+        if item.get("query") == query:
+            old_docs = {int(doc_id) for doc_id in item.get("relevant_docs", [])}
+            item["relevant_docs"] = sorted(old_docs | relevant_set)
+            item.setdefault("description", "图形界面人工评价查询")
+            found = True
+            break
+
+    if not found:
+        queries.append(
+            {
+                "query": query,
+                "description": "图形界面人工评价查询",
+                "relevant_docs": sorted(relevant_set),
+            }
+        )
+
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(queries, f, ensure_ascii=False, indent=2)
 
 
 def page_overview():
@@ -238,18 +269,27 @@ def page_search():
     with right:
         algorithm = st.selectbox("检索算法", ["VSM / TF-IDF", "BM25"])
         top_k = st.slider("返回数量", 5, 20, 10)
+        use_feedback = st.checkbox("使用人工反馈优化排序", value=False)
 
     if st.button("检索", type="primary", use_container_width=True):
         tokens = preprocessor.segment(query)
         st.caption("分词结果：" + (" / ".join(tokens) if tokens else "无有效词项"))
         model = vsm if algorithm.startswith("VSM") else bm25
-        results = model.search(tokens, top_k=top_k)
+        if use_feedback:
+            feedback_store = FeedbackStore(str(FEEDBACK_FILE))
+            feedback_stats = feedback_store.get_feedback_stats()
+            if feedback_stats["total_ratings"] == 0:
+                st.info("当前还没有人工评分数据，本次结果与普通检索基本一致。")
+            results = model.search_with_feedback(tokens, feedback_store, top_k=top_k)
+        else:
+            results = model.search(tokens, top_k=top_k)
 
         if not results:
             st.warning("没有找到相关结果。")
             return
 
-        st.subheader(f"检索结果（{algorithm}）")
+        mode_label = f"{algorithm} + 反馈优化" if use_feedback else algorithm
+        st.subheader(f"检索结果（{mode_label}）")
         for i, item in enumerate(results, 1):
             render_result(item, i)
 
@@ -388,6 +428,74 @@ def page_evaluation():
                 }
             )
         st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+
+    st.subheader("图形化评分")
+    index, preprocessor, vsm, bm25 = load_search_stack(
+        file_stamp(Path(DOCUMENTS_FILE)),
+        file_stamp(Path(INDEX_FILE)),
+    )
+    if not all([index, preprocessor, vsm, bm25]):
+        st.warning("未能加载倒排索引。请先在命令行执行 main.py 的 [2] 构建索引。")
+        return
+
+    left, mid, right = st.columns([3, 1, 1])
+    with left:
+        eval_query = st.text_input("评价查询", value="人工智能 大模型")
+    with mid:
+        eval_algorithm = st.selectbox("评价算法", ["VSM / TF-IDF", "BM25"], key="eval_algorithm")
+    with right:
+        eval_top_k = st.slider("评价条数", 5, 10, 10, key="eval_top_k")
+
+    if st.button("生成待评价结果", type="primary", use_container_width=True):
+        tokens = preprocessor.segment(eval_query)
+        model = vsm if eval_algorithm.startswith("VSM") else bm25
+        st.session_state["eval_query"] = eval_query
+        st.session_state["active_eval_algorithm"] = eval_algorithm
+        st.session_state["eval_tokens"] = tokens
+        st.session_state["eval_results"] = model.search(tokens, top_k=eval_top_k)
+
+    results = st.session_state.get("eval_results", [])
+    active_query = st.session_state.get("eval_query", eval_query)
+    active_algorithm = st.session_state.get("active_eval_algorithm", eval_algorithm)
+
+    if results:
+        st.caption(
+            f"当前评价查询：{active_query}；算法：{active_algorithm}；"
+            "评分含义：5=非常相关，4=相关，3=一般，2=不太相关，1=不相关。"
+        )
+        with st.form("ui_feedback_form"):
+            ratings = {}
+            for i, item in enumerate(results, 1):
+                st.markdown(
+                    f"**{i}. {item.get('title', '无标题')}**  "
+                    f"`相关度 {item.get('score', 0):.6f}`"
+                )
+                st.caption(
+                    f"{item.get('date', '')}  |  {item.get('url', '')}\n\n"
+                    f"{item.get('snippet', '')[:180]}"
+                )
+                ratings[item["id"]] = st.selectbox(
+                    "评分",
+                    [0, 5, 4, 3, 2, 1],
+                    format_func=lambda x: "未评分" if x == 0 else f"{x} 分",
+                    key=f"rating_{active_query}_{item['id']}",
+                )
+                st.divider()
+
+            submitted = st.form_submit_button("保存评分", type="primary")
+
+        if submitted:
+            valid_ratings = {doc_id: rating for doc_id, rating in ratings.items() if rating > 0}
+            if not valid_ratings:
+                st.warning("还没有选择任何评分。")
+            else:
+                store = FeedbackStore(str(FEEDBACK_FILE))
+                store.record_batch(valid_ratings, active_query)
+                relevant_docs = [doc_id for doc_id, rating in valid_ratings.items() if rating >= 4]
+                save_eval_query_record(active_query, relevant_docs)
+                st.cache_data.clear()
+                st.success(f"已保存 {len(valid_ratings)} 条评分。")
+                st.rerun()
 
 
 def page_charts():

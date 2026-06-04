@@ -31,8 +31,7 @@ INFO_RETRIEVE/
 │   ├── images/               # 图片检索数据
 │   ├── videos/               # 视频检索数据
 │   └── charts/               # 可视化结果图
-├── 实验报告.md
-└── 调研报告.md
+└── 实验报告.md
 ```
 
 ## 2. 已实现功能
@@ -227,7 +226,6 @@ pytest tests -v -k "not save_and_load"
 
 - 源代码文件。
 - 实验报告：`实验报告.md`。
-- 调研报告：`调研报告.md`。
 - 本地数据文件：`data/documents.json`、`data/inverted_index.json`、`data/feedback.json` 等。
 - 可视化图表：`data/charts/`。
 - 多媒体测试数据：`data/images/`、`data/videos/`。
