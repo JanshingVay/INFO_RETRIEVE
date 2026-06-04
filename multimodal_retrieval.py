@@ -44,6 +44,10 @@ import warnings
 
 import torch
 
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
 from sentence_transformers import SentenceTransformer
 from config import DATA_DIR
 
@@ -140,6 +144,7 @@ class MultimodalRetriever:
                 self.model_name,
                 trust_remote_code=True,
                 device=self.device,
+                local_files_only=True,
             )
             self._clip_model = self.model._first_module().auto_model
             self._clip_processor = self.model._first_module().processor
@@ -153,10 +158,19 @@ class MultimodalRetriever:
         try:
             from transformers import AutoModel, AutoProcessor
             self.model = None
-            self._clip_model = AutoModel.from_pretrained(self.model_name, trust_remote_code=True)
+            self._clip_model = AutoModel.from_pretrained(
+                self.model_name,
+                trust_remote_code=True,
+                torch_dtype=torch.float32,
+                local_files_only=True,
+            )
             self._clip_model.to(self.device)
             self._clip_model.eval()
-            self._clip_processor = AutoProcessor.from_pretrained(self.model_name, trust_remote_code=True)
+            self._clip_processor = AutoProcessor.from_pretrained(
+                self.model_name,
+                trust_remote_code=True,
+                local_files_only=True,
+            )
             print("[Multimodal] Model loaded via transformers fallback.")
         except Exception as e:
             print(f"[Multimodal] FATAL: cannot load model: {e}")
@@ -185,6 +199,7 @@ class MultimodalRetriever:
         with torch.no_grad():
             features = self._clip_model.get_text_features(**inputs)
         features = features / features.norm(p=2, dim=-1, keepdim=True)
+        features = features.float()
         return features.cpu().numpy().flatten().astype(np.float32)
 
     # ──────────────────── image encoding ────────────────────
@@ -204,6 +219,7 @@ class MultimodalRetriever:
             with torch.no_grad():
                 features = self._clip_model.get_image_features(**inputs)
             features = features / features.norm(p=2, dim=-1, keepdim=True)
+            features = features.float()
             return features.cpu().numpy().flatten().astype(np.float32)
         except Exception as e:
             print(f"[Multimodal] PIL image encoding error: {e}")
@@ -286,7 +302,7 @@ class MultimodalRetriever:
 
         for i, img_path in enumerate(image_files):
             img_id = os.path.basename(img_path)
-            if img_id in self.image_embeddings:
+            if img_id in self.image_embeddings and np.linalg.norm(self.image_embeddings[img_id]) > 0:
                 continue
 
             self.image_embeddings[img_id] = self.encode_image(img_path)
@@ -328,7 +344,7 @@ class MultimodalRetriever:
 
         for i, vid_path in enumerate(video_files):
             vid_id = os.path.basename(vid_path)
-            if vid_id in self.video_embeddings:
+            if vid_id in self.video_embeddings and np.linalg.norm(self.video_embeddings[vid_id]) > 0:
                 continue
 
             print(f"  Video [{i + 1}/{len(video_files)}]: {vid_id} (extracting frames...)")
