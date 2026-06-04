@@ -266,7 +266,38 @@ def page_multimedia():
     query = st.text_input("输入多媒体语义查询", value="猫")
     top_k = st.slider("返回数量", 1, 5, 3, key="media_top_k")
 
-    if st.button("检索视频", type="primary", use_container_width=True):
+    left, right = st.columns(2)
+    with left:
+        search_images = st.button("检索图片", type="primary", use_container_width=True)
+    with right:
+        search_videos = st.button("检索视频", use_container_width=True)
+
+    if search_images:
+        if not image_meta:
+            st.warning("没有可用的图片元数据。请先在命令行菜单 [6] 中索引图片。")
+            return
+        try:
+            retriever = load_multimodal_retriever()
+            results = retriever.search_images(query, top_k=top_k)
+        except Exception as exc:
+            st.error(f"多媒体模型加载或检索失败：{exc}")
+            return
+
+        if not results:
+            st.warning("没有找到图片结果。")
+            return
+
+        for item in results:
+            path = item.get("path", "")
+            st.markdown(
+                f"**{item.get('image_id', 'unknown')}** · 相似度 `{item.get('score', 0):.6f}`"
+            )
+            if path and Path(path).exists():
+                st.image(path, use_container_width=True)
+            else:
+                st.caption(path or "图片路径缺失")
+
+    if search_videos:
         if not video_meta:
             st.warning("没有可用的视频元数据。请先在命令行菜单 [6] 中索引视频。")
             return
@@ -290,6 +321,18 @@ def page_multimedia():
                 st.video(path)
             else:
                 st.caption(path or "视频路径缺失")
+
+    with st.expander("已索引图片列表", expanded=False):
+        rows = []
+        for name, meta in image_meta.items():
+            rows.append(
+                {
+                    "文件": name,
+                    "尺寸": f"{meta.get('width', 0)}x{meta.get('height', 0)}",
+                    "路径": meta.get("path", ""),
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     with st.expander("已索引视频列表", expanded=False):
         rows = []
